@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VRCLink</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="wrap">
+        <header class="header">
+            <div>
+                <h1>VRCLink</h1>
+                <p class="sub">按键说话 → 语音识别 → bot 回复进聊天框</p>
+            </div>
+            <div id="conn-pill" class="pill pill-warn">连接中…</div>
+        </header>
+
+        <section class="cards">
+            <div class="card">
+                <div class="card-label">适配器状态</div>
+                <div class="card-value" id="st-state">—</div>
+                <div class="card-sub" id="st-hotkey">热键 —</div>
+            </div>
+            <div class="card">
+                <div class="card-label">VRChat</div>
+                <div class="card-value" id="st-vrchat">—</div>
+                <div class="card-sub" id="st-oscq">OSCQuery —</div>
+            </div>
+            <div class="card">
+                <div class="card-label">ASR 后端</div>
+                <div class="card-value" id="st-backend">—</div>
+                <div class="card-sub" id="st-model">—</div>
+            </div>
+            <div class="card">
+                <div class="card-label">已发送段数</div>
+                <div class="card-value" id="st-sent">—</div>
+                <div class="card-sub" id="st-pending">队列 —</div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>最近一轮</h2>
+                <span id="st-error" class="err"></span>
+            </div>
+            <div class="kv">
+                <div class="k">识别文本</div>
+                <div class="v" id="st-recognized">（还没有识别记录）</div>
+            </div>
+            <div class="kv">
+                <div class="k">bot 回复</div>
+                <div class="v" id="st-reply">—</div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>测试</h2>
+            </div>
+            <div class="actions">
+                <button id="btn-test-msg" class="btn primary">发送测试消息</button>
+                <div class="record-row">
+                    <label for="test-seconds">试录秒数</label>
+                    <input id="test-seconds" type="number" min="1" max="15" value="3">
+                    <button id="btn-test-rec" class="btn">试录并识别</button>
+                </div>
+                <button id="btn-reset" class="btn ghost">强制复位</button>
+            </div>
+            <div id="test-result" class="test-result"></div>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
+                <h2>最近对话</h2>
+                <button id="btn-refresh" class="btn ghost">刷新</button>
+            </div>
+            <table class="table" id="history-table">
+                <thead>
+                    <tr><th>时间</th><th>识别</th><th>回复</th><th>段数</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="4" class="empty">暂无记录</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <footer class="footer">
+            <span id="st-adapter">适配器 —</span>
+            <span id="st-uptime"></span>
+        </footer>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

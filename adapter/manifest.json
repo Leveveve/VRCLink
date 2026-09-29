@@ -1,0 +1,9 @@
+{
+    "name": "VRChat",
+    "description": "VRChat push-to-talk bridge adapter (OSC chatbox + local ASR)",
+    "locales": {
+        "zh": {
+            "description": "VRChat 按键说话桥接适配器（OSC 聊天框 + 语音识别）"
+        }
+    }
+}

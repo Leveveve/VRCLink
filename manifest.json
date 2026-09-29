@@ -1,0 +1,17 @@
+{
+    "display_name": "VRCLink",
+    "plugin_id": "vrclink",
+    "version": "1.0.0",
+    "core_version": ">=1.0.0",
+    "author": "xl233",
+    "description": "Talk to your KiraAI bot inside VRChat: push-to-talk voice → ASR → reply to the game chatbox. Keyboard and VR-controller PTT (via OVR Advanced Settings Key Press). Local and cloud speech recognition.",
+    "tags": ["vrchat", "voice", "asr", "bridge", "osc", "ptt"],
+    "repo": "https://github.com/Leveveve/VRCLink",
+    "icon": "icon.svg",
+    "locales": {
+        "zh": {
+            "display_name": "VRCLink",
+            "description": "在 VRChat 游戏内与 KiraAI bot 对话：按键说话 → 语音识别 → 回复发送到游戏聊天框。支持键盘与 VR 手柄按键说话（经 OVR Advanced Settings），本地/云端语音识别可切换。"
+        }
+    }
+}

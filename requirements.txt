@@ -1,0 +1,19 @@
+# VRCLink runtime dependencies
+# Install into the bot's venv BEFORE first start (faster-whisper is large;
+# avoid relying on the framework's auto-installer timing out):
+#   <bot-python> -m pip install -r requirements.txt
+#
+# Example (Windows venv):
+#   E:\KiraAI\<bot>\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+python-osc>=1.8.1
+sounddevice>=0.4.6
+pynput>=1.7.6
+psutil>=5.9.0
+httpx>=0.27.0
+numpy>=1.24
+
+# Local ASR (default backend). On Windows + NVIDIA GPU also install the CUDA
+# runtime libs for GPU inference, otherwise it automatically falls back to CPU:
+#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+faster-whisper>=1.0.0
