@@ -55,9 +55,19 @@ def _split_segments(text: str, limit: int = CHATBOX_LIMIT) -> list[str]:
     """Split into chatbox-sized segments: prefer newlines, then sentence
     punctuation, then commas/spaces, finally a hard cut (no broken UTF-8 —
     Python str slicing is codepoint-based, so this is safe)."""
+    # reply_prefix 过长会把 limit 压到 ≤0，入口兜底防死循环
+    limit = max(1, limit)
     segments: list[str] = []
 
     def _emit(chunk: str):
+        # 硬切收敛在 _emit：任何入队的分段都必须 ≤ limit（分句后单段
+        # 仍超长时在此补刀），外层不再需要专门的补刀循环
+        while len(chunk) > limit:
+            cut = chunk.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            piece, chunk = chunk[:cut].strip(), chunk[cut:]
+            if piece:
+                segments.append(piece)
         chunk = chunk.strip()
         if chunk:
             segments.append(chunk)
@@ -82,11 +92,6 @@ def _split_segments(text: str, limit: int = CHATBOX_LIMIT) -> list[str]:
         rest = _split_by(para, "。！？!?；;")
         if len(rest) > limit:
             rest = _split_by(rest, "，,、")
-        while len(rest) > limit:
-            cut = rest.rfind(" ", 0, limit)
-            cut = cut if cut > limit // 2 else limit
-            _emit(rest[:cut])
-            rest = rest[cut:]
         _emit(rest)
 
     return segments
@@ -209,6 +214,9 @@ class _HotkeyWatcher:
         self.on_down = on_down
         self.on_up = on_up
         self._held_mods: set[str] = set()
+        # 目标键当前是否按住：键盘按住不放会持续派发 on_press（自动重复），
+        # 只认第一次按下，on_release 时清零
+        self._pressed = False
         self._listener = None
         if not self.key:
             raise ValueError("empty hotkey")
@@ -222,8 +230,16 @@ class _HotkeyWatcher:
                 raise ValueError(f"unknown mouse button: {self.key}")
 
             def on_click(_, button, pressed):
+                # 鼠标事件本身无自动重复，但与键盘共用 _pressed 状态位，
+                # 顺带防御驱动/注入产生的重复 press 事件
                 if button == target:
-                    (self.on_down if pressed else self.on_up)()
+                    if pressed:
+                        if not self._pressed:
+                            self._pressed = True
+                            self.on_down()
+                    else:
+                        self._pressed = False
+                        self.on_up()
 
             self._listener = mouse.Listener(on_click=on_click)
         else:
@@ -251,10 +267,17 @@ class _HotkeyWatcher:
                 if n in self._MOD_ALIASES["ctrl"] | self._MOD_ALIASES["shift"] | self._MOD_ALIASES["alt"]:
                     self._held_mods.add(n)
                 elif matches(self._held_mods, n):
-                    self.on_down()
+                    # 自动重复的 on_press 只认第一次
+                    if not self._pressed:
+                        self._pressed = True
+                        self.on_down()
 
             def on_release(key):
                 n = norm(key)
+                # 触发键一松开就解锁状态位：修饰键可能先松掉，此时 matches 不成立，
+                # 若不解锁，下一次按下会被当成"自动重复"被吞掉（组合键失效）
+                if n == self.key:
+                    self._pressed = False
                 if n in self._MOD_ALIASES["ctrl"] | self._MOD_ALIASES["shift"] | self._MOD_ALIASES["alt"]:
                     self._held_mods.discard(n)
                 elif matches(self._held_mods, n):
@@ -609,6 +632,18 @@ class _LocalWhisper:
 
 # ─────────────────────────── the adapter ───────────────────────────
 
+# 插件 main.py 的 initialize() 注入的云端 STT getter（模块级兜底）：
+# 适配器配置热更新会重建实例，实例级 _stt_provider 随之丢失，而适配器
+# 模块在实例重建间被 sys.modules 缓存，新实例为空时回退到这里取。
+# 签名：getter(model_uuid: str = "") -> STTModelClient | None
+_STT_GETTER = None
+
+
+def set_stt_getter(getter):
+    global _STT_GETTER
+    _STT_GETTER = getter
+
+
 class VRChatAdapter(IMAdapter):
     def __init__(self, info, event_queue: asyncio.Queue):
         super().__init__(info, event_queue)
@@ -620,6 +655,9 @@ class VRChatAdapter(IMAdapter):
         self._whisper: _LocalWhisper | None = None
         self._state = "idle"  # idle -> recording -> transcribing -> sending
         self._state_since = time.time()
+        # 状态代数：force_reset / 看门狗复位时自增；_ptt_up 进入时捕获，
+        # 写 sending 前校验，不匹配说明中途被复位过，放弃本次识别结果
+        self._generation = 0
         self._max_timer: asyncio.Task | None = None
         self._send_timeout_timer: asyncio.Task | None = None
         self._wav_dir = get_data_path() / "plugin_data" / PLUGIN_DATA_NAME / "tmp"
@@ -751,7 +789,7 @@ class VRChatAdapter(IMAdapter):
             self._whisper.last_error = str(e)
 
     async def _state_watchdog(self):
-        """If recording/transcribing sticks around too long, force idle."""
+        """If recording/transcribing sticks around too long, force a reset."""
         while True:
             await asyncio.sleep(5)
             if self._state not in ("recording", "transcribing"):
@@ -761,16 +799,14 @@ class VRChatAdapter(IMAdapter):
                 self.config.get("max_record_seconds", 60)
             ) + 30
             if stuck_for > limit:
+                stuck = self._state
                 logger.warning(
-                    f"state watchdog: {self._state} stuck for {stuck_for:.0f}s, forcing idle"
+                    f"state watchdog: {stuck} stuck for {stuck_for:.0f}s, forcing reset"
                 )
-                self.last_error = f"状态 {self._state} 超时，已自动复位"
-                try:
-                    if self._sender:
-                        self._sender.set_typing(False)
-                except Exception:
-                    pass
-                self._set_state("idle")
+                # 复用 force_reset：recording 卡死时关麦、清定时器、关 typing，
+                # 并自增状态代数让在途 _ptt_up 放弃晚到的识别结果
+                self.force_reset()
+                self.last_error = f"状态 {stuck} 超时，已自动复位"
 
     async def _probe_loop(self):
         import httpx
@@ -801,7 +837,8 @@ class VRChatAdapter(IMAdapter):
         # Chatbox messages appear under the local player's name — prefix so
         # bystanders can tell bot replies from the human's own chat.
         # Empty default: set to your bot nickname in adapter config (e.g. "yuki：").
-        return str(self.config.get("reply_prefix", "") or "")
+        # 截断到 ≤100 字：前缀过长会把分段 limit（140-len）压到 ≤0 导致死循环
+        return str(self.config.get("reply_prefix", "") or "")[:100]
 
     def _enqueue_reply(self, full: str) -> list[str]:
         prefix = self._reply_prefix()
@@ -883,6 +920,7 @@ class VRChatAdapter(IMAdapter):
     async def _ptt_up(self):
         if self._state != "recording":
             return
+        generation = self._generation
         if self._max_timer:
             self._max_timer.cancel()
             self._max_timer = None
@@ -900,6 +938,12 @@ class VRChatAdapter(IMAdapter):
             if self._sender:
                 self._sender.set_typing(False)
             self._set_state("idle")
+            return
+
+        if self._generation != generation:
+            # 识别期间被 force_reset / 看门狗复位过：放弃本次结果，
+            # 避免覆盖复位后的状态（此时可能已开始新一轮录音）
+            logger.warning("ptt result dropped: state was reset during transcription")
             return
 
         self.last_recognized = text
@@ -1062,6 +1106,8 @@ class VRChatAdapter(IMAdapter):
                 self._sender.set_typing(False)
         except Exception:
             pass
+        # 代数 +1：让复位前进入的在途 _ptt_up 放弃本次识别结果
+        self._generation += 1
         self._set_state("idle")
         self.last_error = ""
         logger.warning(f"force_reset: {prev} -> idle")
@@ -1078,7 +1124,9 @@ class VRChatAdapter(IMAdapter):
         return await asyncio.wait_for(self._whisper.transcribe(wav_path), timeout=timeout)
 
     async def _transcribe_cloud(self, wav_path: str) -> str:
-        if not self._stt_provider:
+        # 实例级 getter 优先；为空（配置热更新重建后的新实例）回退模块级兜底
+        getter = self._stt_provider or _STT_GETTER
+        if not getter:
             raise RuntimeError(
                 "cloud STT unavailable — restart the bot after enabling the plugin, "
                 "or switch asr_backend to local"
@@ -1086,10 +1134,10 @@ class VRChatAdapter(IMAdapter):
         # Prefer the per-adapter override; empty falls back to KiraAI default STT.
         preferred = str(self.config.get("cloud_stt_model", "") or "").strip()
         try:
-            stt = self._stt_provider(preferred)
+            stt = getter(preferred)
         except TypeError:
             # Older getter with no-arg signature.
-            stt = self._stt_provider()
+            stt = getter()
         if stt is None:
             raise RuntimeError(
                 "no STT model available — configure a default STT in KiraAI "

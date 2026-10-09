@@ -9,7 +9,7 @@
 VRChat 聊天框 ◄── OSC /chatbox/input ◄── 分段 + 节流 ◄── bot 回复
 ```
 
-- 版本：**1.0.0**
+- 版本：**1.0.1**
 - 平台：Windows（依赖 pynput 全局热键 / sounddevice / 前台窗口检测）
 - 游戏：VRChat（官方 OSC 接口，UDP 本机回环，EAC 安全）
 - Bot：KiraAI（插件 + 适配器实例）

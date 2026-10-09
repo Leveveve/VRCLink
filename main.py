@@ -11,6 +11,7 @@ Config lives on the adapter instance (WebUI -> Adapters -> VRChat instance).
 """
 
 import html
+import sys
 
 from core.plugin import BasePlugin, logger, on, register, PluginPage, PageMenu
 from core.prompt_manager import Prompt
@@ -41,6 +42,12 @@ class VRCLinkPlugin(BasePlugin):
         ada = self._find_adapter()
         if ada is not None and hasattr(ada, "set_stt_provider"):
             ada.set_stt_provider(self._get_stt)
+        # 同时写一份到适配器模块的模块级变量：适配器配置热更新会重建实例
+        # （实例级 getter 随之丢失），新实例会回退到模块级兜底。
+        if ada is not None:
+            adapter_mod = sys.modules.get(type(ada).__module__)
+            if adapter_mod is not None and hasattr(adapter_mod, "set_stt_getter"):
+                adapter_mod.set_stt_getter(self._get_stt)
         logger.info("VRCLink plugin initialized")
 
     async def terminate(self):
