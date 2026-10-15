@@ -9,7 +9,7 @@
 VRChat 聊天框 ◄── OSC /chatbox/input ◄── 分段 + 节流 ◄── bot 回复
 ```
 
-- 版本：**1.0.1**
+- 版本：**1.1.0**（自 1.1.0 起适配 **KiraAI v3.0.0+**；v2.x 旧核心请用 VRCLink ≤1.0.x）
 - 平台：Windows（依赖 pynput 全局热键 / sounddevice / 前台窗口检测）
 - 游戏：VRChat（官方 OSC 接口，UDP 本机回环，EAC 安全）
 - Bot：KiraAI（插件 + 适配器实例）
@@ -40,6 +40,7 @@ VRChat 聊天框 ◄── OSC /chatbox/input ◄── 分段 + 节流 ◄─�
 | 项 | 要求 |
 |----|------|
 | 操作系统 | Windows 10/11（全局热键、前台检测、音频均为 Windows 路径） |
+| KiraAI | 核心 **v3.0.0+**（VRCLink 1.1.0 改用 v3 的 BaseAdapter / IMCapability 适配器接口） |
 | Python | 3.10+（KiraAI 运行环境） |
 | VRChat | 已安装，游戏内开启 OSC（菜单 → OSC → Enabled） |
 | 麦克风 | 系统默认或可指定设备名 |
@@ -243,7 +244,7 @@ VR 手柄本身不进 Windows 键盘层。用 [OVR Advanced Settings](https://st
 | **适配器实例名含冒号** | 会话路由失败 | 实例名用 `vrchat` 这类简单名 |
 | **单 bot 单实例** | 多 bot 同时开会抢热键 / 麦克风 / OSC 端口 | 一次只开一个 VRCLink |
 | **OVRAS 与 SteamVR** | 手柄 PTT 依赖 OVRAS 随 SteamVR 运行 | 设自启；Key Press 动作需绑定 |
-| **KiraAI 版本变动** | 核心 API（Adapter / Prompt）可能调整 | `core_version: >=1.0.0`；异常时看日志 |
+| **KiraAI 版本变动** | 核心 API（Adapter / Prompt）可能调整 | `core_version: >=3.0.0`；异常时看日志 |
 
 ---
 

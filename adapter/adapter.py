@@ -2,7 +2,7 @@
 VRChat adapter — push-to-talk bridge between VRChat and the KiraAI message pipeline.
 
 Flow (outbound to VRChat):
-    KiraAI pipeline reply -> send_direct_message(user_id, MessageChain)
+    KiraAI pipeline reply -> IMCapability.send_direct_message(user_id, MessageChain)
         -> extract Text elements -> split into <=140 char segments
         -> throttled asyncio queue -> OSC /chatbox/input to 127.0.0.1:<osc_in_port>
 
@@ -11,7 +11,7 @@ Flow (inbound from VRChat):
     which synthesizes the same OS-level key) -> pynput listener
         -> record 16kHz mono wav via sounddevice
         -> ASR (faster-whisper locally, or KiraAI default STT provider)
-        -> KiraMessageEvent(adapter, dm, is_mentioned=True) -> publish()
+        -> IMCapability.publish -> KiraMessageEvent(adapter, dm, is_mentioned=True)
 """
 
 import asyncio
@@ -23,7 +23,11 @@ import uuid
 import wave
 from pathlib import Path
 
-from core.adapter.adapter_utils import IMAdapter
+from core.adapter.access import ListAccessPolicy
+from core.adapter.base import AdapterTargetId, BaseAdapter
+from core.adapter.capabilities import IMCapability
+from core.adapter.context import AdapterContext
+from core.adapter.message_format_metadata import MessageFormatMetadata
 from core.chat import KiraIMMessage, KiraIMSentResult, KiraMessageEvent, MessageChain, User
 from core.chat.message_elements import Record, Text
 from core.logging_manager import get_logger
@@ -644,10 +648,58 @@ def set_stt_getter(getter):
     _STT_GETTER = getter
 
 
-class VRChatAdapter(IMAdapter):
-    def __init__(self, info, event_queue: asyncio.Queue):
-        super().__init__(info, event_queue)
-        self.message_types = ["text"]
+class VRChatIMCapability(IMCapability["VRChatAdapter"]):
+    """IM operations: receive local PTT transcriptions, reply to the chatbox."""
+
+    _SUPPORTED_ELEMENTS = ["text"]
+
+    async def get_message_metadata(self) -> MessageFormatMetadata:
+        return MessageFormatMetadata(self._supported_elements)
+
+    def publish_transcription(self, text: str):
+        """Publish an ASR result as an inbound DM from the configured owner.
+
+        Local PTT is the only inbound source; the instance access policy
+        (im.direct.receive) still gates the owner id like any other adapter.
+        """
+        owner_id = str(self.adapter.config.get("owner_id", "owner"))
+        if not self.is_allowed(owner_id, permission="im.direct.receive"):
+            logger.info(f"PTT input denied by access policy: {owner_id!r}")
+            return
+        self.publish(self.adapter._build_message_event(text))
+
+    async def send_group_message(
+        self, group_id: AdapterTargetId, message: MessageChain,
+    ) -> KiraIMSentResult | None:
+        return KiraIMSentResult(None, ok=False, err="VRChat adapter is DM-only")
+
+    async def send_direct_message(
+        self, user_id: AdapterTargetId, message: MessageChain,
+    ) -> KiraIMSentResult | None:
+        texts, skipped = [], 0
+        for ele in message:
+            t = getattr(ele, "text", None)
+            if isinstance(t, str) and t.strip():
+                texts.append(_strip_noise(t))
+            else:
+                skipped += 1
+        full = " ".join(x for x in texts if x)
+        if not full:
+            return KiraIMSentResult(None, ok=True)
+        if skipped:
+            logger.debug(f"dropped {skipped} non-text element(s) from reply")
+        segments = self.adapter._enqueue_reply(full)
+        self.adapter.last_reply = full
+        self.adapter._push_history(reply=full, segments=len(segments))
+        self.adapter._log_conversation(reply=full, segments=len(segments))
+        return KiraIMSentResult(str(uuid.uuid4()), ok=True)
+
+
+class VRChatAdapter(BaseAdapter):
+    def __init__(self, ctx: AdapterContext):
+        super().__init__(ctx)
+        self.im = self.register_capability(IMCapability, VRChatIMCapability(self))
+        self._configure_access()
         self._tasks: list[asyncio.Task] = []
         self._hotkey: _HotkeyWatcher | None = None
         self._recorder = _Recorder()
@@ -676,6 +728,30 @@ class VRChatAdapter(IMAdapter):
         # Signature: getter(model_uuid: str = "") -> STTModelClient | None
         #   empty model_uuid = KiraAI default STT; "provider_id:model_id" = specific.
         self._stt_provider = None
+
+    def _configure_access(self) -> None:
+        """Build im.* access policies from the instance config fields.
+
+        Mirrors the schema: permission_mode + {group,user}_{allow,deny}_list.
+        The shipped default (deny_list + empty lists) accepts everything —
+        the only inbound source is this PC's PTT, same as v2.
+        """
+        mode = self.config.get("permission_mode", "deny_list")
+        valid_mode = mode in ("allow_list", "deny_list")
+        for scope, permission in (
+            ("group", "im.group.receive"),
+            ("user", "im.direct.receive"),
+        ):
+            allow_list = self.config.get(f"{scope}_allow_list", [])
+            deny_list = self.config.get(f"{scope}_deny_list", [])
+            policy = ListAccessPolicy.from_lists(
+                mode if valid_mode else "deny_list",
+                allow_list=allow_list if valid_mode and isinstance(allow_list, list) else [],
+                deny_list=deny_list if valid_mode and isinstance(deny_list, list) else [],
+            )
+            self.access.set_policy(
+                capability_type=IMCapability, permission=permission, policy=policy,
+            )
 
     # ── lifecycle ──
 
@@ -830,9 +906,6 @@ class VRChatAdapter(IMAdapter):
 
     # ── pipeline -> VRChat ──
 
-    async def send_group_message(self, group_id, send_message_obj) -> KiraIMSentResult:
-        return KiraIMSentResult(None, ok=False, err="VRChat adapter is DM-only")
-
     def _reply_prefix(self) -> str:
         # Chatbox messages appear under the local player's name — prefix so
         # bystanders can tell bot replies from the human's own chat.
@@ -846,24 +919,25 @@ class VRChatAdapter(IMAdapter):
         self._sender.enqueue(segments, prefix=prefix)
         return segments
 
-    async def send_direct_message(self, user_id, send_message_obj) -> KiraIMSentResult:
-        texts, skipped = [], 0
-        for ele in send_message_obj:
-            t = getattr(ele, "text", None)
-            if isinstance(t, str) and t.strip():
-                texts.append(_strip_noise(t))
-            else:
-                skipped += 1
-        full = " ".join(x for x in texts if x)
-        if not full:
-            return KiraIMSentResult(None, ok=True)
-        if skipped:
-            logger.debug(f"dropped {skipped} non-text element(s) from reply")
-        segments = self._enqueue_reply(full)
-        self.last_reply = full
-        self._push_history(reply=full, segments=len(segments))
-        self._log_conversation(reply=full, segments=len(segments))
-        return KiraIMSentResult(str(uuid.uuid4()), ok=True)
+    def _build_message_event(self, text: str) -> KiraMessageEvent:
+        now = int(time.time())
+        return KiraMessageEvent(
+            adapter=self.info,
+            supported_elements=list(self.im._supported_elements),
+            message=KiraIMMessage(
+                message_id=str(uuid.uuid4()),
+                self_id=str(self.info.name),
+                chain=MessageChain([Text(text)]),
+                timestamp=now,
+                sender=User(
+                    user_id=str(self.config.get("owner_id", "owner")),
+                    nickname=self.config.get("owner_nickname", "主人"),
+                ),
+                is_mentioned=True,  # required by DefaultChatPlugin trigger logic
+                raw_message={"source": "ptt"},
+            ),
+            timestamp=now,
+        )
 
     # ── VRChat -> pipeline (PTT state machine) ──
 
@@ -1026,24 +1100,7 @@ class VRChatAdapter(IMAdapter):
             self._set_state("idle")
 
     def _publish_event(self, text: str):
-        now = int(time.time())
-        self.publish(KiraMessageEvent(
-            adapter=self.info,
-            message_types=self.message_types,
-            message=KiraIMMessage(
-                message_id=str(uuid.uuid4()),
-                self_id=str(self.info.name),
-                chain=MessageChain([Text(text)]),
-                timestamp=now,
-                sender=User(
-                    user_id=str(self.config.get("owner_id", "owner")),
-                    nickname=self.config.get("owner_nickname", "主人"),
-                ),
-                is_mentioned=True,  # required by DefaultChatPlugin trigger logic
-                raw_message={"source": "ptt"},
-            ),
-            timestamp=now,
-        ))
+        self.im.publish_transcription(text)
 
     # ── test hooks (status page) ──
 
