@@ -426,17 +426,34 @@ def _apply_hf_endpoint(endpoint: str):
 
 _CUDA_DLL_PATHS_APPLIED = False
 
+# ctranslate2 links these CUDA runtime DLLs at inference time. Names match the
+# pip packages in the bot venv (nvidia-cublas-cu12 / nvidia-cudnn-cu12 /
+# nvidia-cuda-nvrtc-cu12); each load checks existence first, so a version bump
+# that renames a file just skips it and degrades to the CPU fallback as before.
+_CTRANSLATE2_CUDA_DLLS = (
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cudnn64_9.dll",
+    "nvrtc64_120_0.dll",
+)
+
 
 def _ensure_cuda_dll_paths():
-    """Register pip-installed NVIDIA runtime DLL dirs so ctranslate2 can load.
+    """Register NVIDIA DLL dirs and preload what ctranslate2 links against.
 
-    Windows does not search site-packages/nvidia/*/bin unless we add it via
-    os.add_dll_directory (Python 3.8+). cublas64_12.dll lives there and is
-    required at inference time, not at model-load time.
+    os.add_dll_directory alone is NOT enough: it only affects loaders using
+    LOAD_LIBRARY_SEARCH_USER_DIRS (i.e. Python's own extension imports).
+    ctranslate2 resolves cublas64_12.dll etc. with its own plain LoadLibrary
+    call, which ignores those dirs — hence the explicit preload by full path.
+    Once a DLL is loaded in-process, ctranslate2's by-name LoadLibrary finds
+    it via the loaded-module cache without any path search. cudnn64_9.dll's
+    sub-DLLs (cudnn_ops64_9.dll & co.) resolve from its own directory because
+    WinDLL on an absolute path implies LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
     """
     global _CUDA_DLL_PATHS_APPLIED
     if _CUDA_DLL_PATHS_APPLIED:
         return
+    import ctypes
     import sys
 
     bins: list[Path] = []
@@ -459,6 +476,17 @@ def _ensure_cuda_dll_paths():
             os.add_dll_directory(str(b))
         except Exception as e:
             logger.debug(f"add_dll_directory({b}) failed: {e}")
+
+    for b in bins:
+        for name in _CTRANSLATE2_CUDA_DLLS:
+            p = b / name
+            if not p.is_file():
+                continue
+            try:
+                ctypes.WinDLL(str(p))
+                logger.debug(f"preloaded CUDA dll: {p}")
+            except Exception as e:
+                logger.debug(f"CUDA dll preload failed ({p}): {e}")
 
     if bins:
         _CUDA_DLL_PATHS_APPLIED = True

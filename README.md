@@ -9,7 +9,7 @@
 VRChat 聊天框 ◄── OSC /chatbox/input ◄── 分段 + 节流 ◄── bot 回复
 ```
 
-- 版本：**1.1.0**（自 1.1.0 起适配 **KiraAI v3.0.0+**；v2.x 旧核心请用 VRCLink ≤1.0.x）
+- 版本：**1.1.1**（1.1.1 修复 CUDA DLL 预加载、本地 GPU 推理真正生效；自 1.1.0 起适配 **KiraAI v3.0.0+**；v2.x 旧核心请用 VRCLink ≤1.0.x）
 - 平台：Windows（依赖 pynput 全局热键 / sounddevice / 前台窗口检测）
 - 游戏：VRChat（官方 OSC 接口，UDP 本机回环，EAC 安全）
 - Bot：KiraAI（插件 + 适配器实例）
@@ -236,7 +236,7 @@ VR 手柄本身不进 Windows 键盘层。用 [OVR Advanced Settings](https://st
 | **9000 端口占用** | 其他 OSC 工具抢入站口则收不到 | 关闭冲突工具或改 `osc_in_port` 与 VRChat 对齐 |
 | **9001 出站占用** | 仅影响备用手势方案（默认不用） | v1 主路径是键盘热键，可忽略 |
 | **本地 whisper 显存不足** | VR 中 GPU 被占满可能 OOM/掉帧 | 换 `medium`/`small`、改 CPU、或 `asr_backend=cloud` |
-| **CUDA 依赖安装失败** | 只能 CPU，识别变慢 | 装 `nvidia-cublas-cu12 nvidia-cudnn-cu12`，或改云端 |
+| **CUDA 依赖安装失败** | 缺失时自动回退 CPU，识别变慢 | 装 `nvidia-cublas-cu12 nvidia-cudnn-cu12`，或改云端 |
 | **首次下载 whisper 模型** | 可能较久或失败（网络） | 用 `hf_endpoint` 镜像；或改云端 |
 | **ASR 幻觉 / 空识别** | 静音或过短时胡乱文字 | 已有过滤；仍可在提示词里约束 |
 | **回复挂本机玩家名下** | 不加前缀时像玩家自己在说话 | **务必设置 `reply_prefix`** |
@@ -260,6 +260,7 @@ VR 手柄本身不进 Windows 键盘层。用 [OVR Advanced Settings](https://st
 | 「···」闪断 | 已保活；若仍闪，查 VRChat 版本与 typing 开关 |
 | 长句读不完就跳 | 调大 `read_chars_per_second` 倒数，或调大 `max_segment_interval` |
 | 手柄无效 | OVRAS INI 是否 `keyPressSystem=b` 且改完重启过 OVRAS；SteamVR 是否绑了 Key Press System |
+| 日志报 `cublas64_12.dll is not found` / `CUDA load failed` | ≤1.1.0 的已知问题（1.1.1 起自动预加载 CUDA DLL）；CUDA 缺失时自动回退 CPU，若仍想上 GPU 确认已装 `nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12` |
 
 日志关键字：`VRChat`、`chatbox <-`、`recognized:`、`whisper`、`VRCLink`。
 
