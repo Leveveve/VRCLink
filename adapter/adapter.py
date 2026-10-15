@@ -728,6 +728,9 @@ class VRChatAdapter(BaseAdapter):
         # Signature: getter(model_uuid: str = "") -> STTModelClient | None
         #   empty model_uuid = KiraAI default STT; "provider_id:model_id" = specific.
         self._stt_provider = None
+        # start() 即运行协程（core/adapter/base.py:146-155），return 会被判定
+        # run 结束并把实例从注册表摘除（adapter_registry.py:524-551），见 start() 末尾。
+        self._stop_event: asyncio.Event | None = None
 
     def _configure_access(self) -> None:
         """Build im.* access policies from the instance config fields.
@@ -791,7 +794,15 @@ class VRChatAdapter(BaseAdapter):
         self._tasks.append(asyncio.create_task(self._state_watchdog()))
         logger.info("VRChat adapter started")
 
+        # 契约：start() 返回即 run 结束，注册表会摘除实例（core/adapter/base.py:146-155、
+        # adapter_registry.py:524-551）。挂起等待 stop() 置位或被管理器取消
+        # （CancelledError 正常上抛）；每次 start 新建事件，防复用上一轮已 set 的对象。
+        self._stop_event = asyncio.Event()
+        await self._stop_event.wait()
+
     async def stop(self):
+        if self._stop_event is not None:
+            self._stop_event.set()
         for t in self._tasks:
             t.cancel()
         if self._max_timer:
