@@ -72,6 +72,34 @@
 
         <section class="panel">
             <div class="panel-head">
+                <h2>麦克风电平</h2>
+                <div>
+                    <button id="btn-mic-refresh" class="btn ghost">刷新麦克风列表</button>
+                    <button id="btn-devices" class="btn ghost">刷新设备列表</button>
+                </div>
+            </div>
+            <div id="mic-current" class="mic-current"></div>
+            <div id="mic-resolved" class="mic-current"></div>
+            <div id="mic-warn" class="mic-warn" style="display:none"></div>
+            <div id="mic-refresh-note" class="mic-hint" style="display:none"></div>
+            <table class="table" id="device-table">
+                <thead>
+                    <tr><th>设备</th><th>Host API</th><th>16 kHz</th><th>电平（peak / rms dBFS）</th><th></th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="5" class="empty">尚未加载，点「刷新设备列表」</td></tr>
+                </tbody>
+            </table>
+            <p class="mic-hint">
+                适配器配置里的「麦克风设备」是下拉列表（插件启动时自动检测本机可用 16 kHz 的输入设备，首项 = 跟随 Windows 系统默认）。
+                换了麦克风后点「刷新麦克风列表」会把新列表写入配置——但下拉要<b>重启 bot（或禁用/启用插件）后</b>才会更新；本页设备列表与「测电平」即时可用。<br>
+                经验参考：peak &gt; -50 dBFS 才算「能听见人声」；正常说话时 -30 ~ -10 dBFS 较理想；
+                peak ≈ 0 且提示触顶说明增益过大（削波）。「测电平」会录音 2 秒（只测电平，不识别），期间请自然说话或保持安静。
+            </p>
+        </section>
+
+        <section class="panel">
+            <div class="panel-head">
                 <h2>最近对话</h2>
                 <button id="btn-refresh" class="btn ghost">刷新</button>
             </div>

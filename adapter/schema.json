@@ -98,9 +98,23 @@
     "mic_device": {
         "name": "Microphone device",
         "type": "string",
-        "default": "",
-        "hint": "Substring of the device name shown by sounddevice.query_devices(). Empty = system default.",
-        "locales": { "zh": { "name": "麦克风设备", "hint": "设备名的一部分（可在 WebUI 控制台用 python -c \"import sounddevice;print(sounddevice.query_devices())\" 查询）。留空 = 系统默认" } }
+        "default": "【系统默认】跟随 Windows 设置",
+        "hint": "Dropdown populated at plugin start with this PC's 16 kHz-capable input devices (first item = follow the Windows default device). After refreshing the list on the status page, restart the bot (or disable/enable the plugin) for the dropdown to update. If a configured device is not found when recording starts, the system default is used and a warning shows on the status page.",
+        "locales": { "zh": { "name": "麦克风设备", "hint": "下拉列表由插件启动时自动检测（本机可用 16 kHz 的输入设备），首项 = 跟随 Windows 系统默认。在状态页刷新列表后，需重启 bot（或禁用/启用插件）下拉才会更新；录音时找不到已配置的设备会自动回退系统默认并在状态页提示" } }
+    },
+    "mic_gain": {
+        "name": "Microphone gain",
+        "type": "float",
+        "default": 1.0,
+        "minimum": 0.5,
+        "maximum": 20.0,
+        "hint": "Software gain applied to the mic signal before ASR: 1.0 = untouched, 2-5 helps quiet microphones. Too high clips (see the level meter on the status page).",
+        "locales": {
+            "zh": {
+                "name": "麦克风增益",
+                "hint": "麦克风增益倍数；1.0=原样，2~5 适合电平偏低的麦克风，过高会削波（可在状态页电平表看到 clipping 提示）"
+            }
+        }
     },
     "max_record_seconds": {
         "name": "Max recording seconds",

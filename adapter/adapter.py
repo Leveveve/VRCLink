@@ -16,6 +16,7 @@ Flow (inbound from VRChat):
 
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -45,6 +46,200 @@ CHATBOX_LIMIT = 140  # VRChat hard limit is 144; leave headroom
 _HF_MIRROR = "https://hf-mirror.com"
 # Plugin data folder name under <data>/plugin_data/ (stable across bots).
 PLUGIN_DATA_NAME = "vrclink"
+
+# mic_device 下拉列表的首个哨兵项：选中它（或配置为空串）= 不指定设备，
+# sounddevice 用 Windows 系统默认输入。value 即该字符串本身。
+MIC_DEVICE_DEFAULT_OPTION = "【系统默认】跟随 Windows 设置"
+# 下拉项的 hostapi 前缀分隔符："{hostapi} · {name}"
+_MIC_HOSTAPI_SEP = " · "
+
+
+# ─────────────────────── mic_device 解析（唯一权威实现） ───────────────────────
+
+def resolve_mic_device(value: str, devices=None):
+    """把 mic_device 配置值解析成 sounddevice 输入设备 index。
+
+    规则（与 README「故障排查」一致，所有调用点都必须走这里）：
+      1. 空串 / 以「【系统默认】」开头 → (None, "", "")：不指定设备，
+         sounddevice 用系统默认；
+      2. 与某设备完整名精确匹配（忽略大小写与首尾空白，MME 设备名常带
+         尾部空格）→ 该设备；
+      3. 子串匹配（不区分大小写，要求 max_input_channels>0）：先拿原值整串
+         匹配（兼容旧版手填），再拿去掉 "{hostapi} · " 前缀后的值匹配
+         （兼容下拉项），返回枚举顺序里的首个命中；
+      4. 都不中 → (None, "not_found", 警告文本)：回退系统默认，不抛致命错。
+
+    devices 传入 sd.query_devices() 结果可避免重复枚举（状态页轮询用）。
+    纯函数、不打日志、不开设备——警告由调用方决定是否记录。
+    返回 (index_or_None, how, warning)，how ∈ {"", "exact", "substring",
+    "substring_unprefixed", "not_found"}。
+    """
+    value = str(value or "").strip()
+    if not value or value.startswith("【系统默认】"):
+        return None, "", ""
+    if devices is None:
+        import sounddevice as sd
+        devices = sd.query_devices()
+
+    def entries():
+        for dev in devices:
+            try:
+                if int(dev.get("max_input_channels", 0)) > 0:
+                    yield int(dev.get("index", -1)), str(dev.get("name", "") or "")
+            except Exception:
+                continue
+
+    want = value.strip().lower()
+    for idx, name in entries():  # 规则 2：完整名精确匹配
+        if name.strip().lower() == want:
+            return idx, "exact", ""
+    for idx, name in entries():  # 规则 3a：原值子串（旧版手填行为）
+        if want in name.lower():
+            return idx, "substring", ""
+    stripped = value
+    if _MIC_HOSTAPI_SEP in stripped:
+        stripped = stripped.split(_MIC_HOSTAPI_SEP, 1)[1].strip()
+    if stripped and stripped.lower() != want:
+        want2 = stripped.lower()
+        for idx, name in entries():  # 规则 3b：去掉 hostapi 前缀的子串（下拉项）
+            if want2 in name.lower():
+                return idx, "substring_unprefixed", ""
+    return None, "not_found", f"未找到麦克风设备「{value}」，已回退系统默认"
+
+
+def build_mic_device_options(devices: list[dict], current_values=None) -> list[str]:
+    """由设备表生成 mic_device 下拉 options（哨兵恒在首位）。
+
+    只收能以 16 kHz 打开的输入设备；标签形如 "{hostapi} · {name}"，按完整
+    设备名去重（忽略大小写/首尾空白），同名保留枚举序里首个 hostapi（MME
+    通常在最前）。current_values 是已保存的配置值：不在列表里则原样追加到
+    末尾（不带任何后缀——value 与 label 是同一字符串，加后缀会改掉值），
+    保证 WebUI 下拉与 build_fields 不会把用户已保存的设备名洗掉。
+    """
+    options = [MIC_DEVICE_DEFAULT_OPTION]
+    seen = set()
+    for d in devices or []:
+        try:
+            if not d.get("ok_16k"):
+                continue
+            name = str(d.get("name", "") or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            hostapi = str(d.get("hostapi", "") or "").strip()
+            options.append(f"{hostapi}{_MIC_HOSTAPI_SEP}{name}" if hostapi else name)
+        except Exception:
+            continue
+    for v in current_values or []:
+        v = str(v or "").strip()
+        if not v or v.startswith("【系统默认】") or v in options:
+            continue
+        options.append(v)
+    return options
+
+
+def refresh_mic_device_options(schema_path, current_values=None) -> list[str]:
+    """把本机真实麦克风列表写进 adapter/schema.json 的 mic_device.options。
+
+    框架只从 <组件目录>/schema.json 静态读 schema（core/plugin/manager.py
+    register_plugin_adapter → build_fields），没有动态选项机制，所以插件
+    必须在注册适配器之前自行刷新这个文件；下拉列表因此要等 bot 重启（或
+    插件禁用再启用）才会在 WebUI 生效。
+
+    写入是文本外科手术：只动 mic_device 块里的 options 数组，其余内容
+    逐字保持原样（文件是手写格式，json 全量回写会重排 locales 等紧凑行）。
+    options 与现值相同则不写（避免无谓改动 mtime）。写回原子（tmp +
+    os.replace）。返回最终 options；任何异常由调用方兜住，绝不影响初始化。
+    """
+    schema_path = Path(schema_path)
+    text = schema_path.read_text(encoding="utf-8")
+    schema = json.loads(text)
+    field = schema.get("mic_device")
+    if not isinstance(field, dict):
+        raise ValueError(f"schema.json has no mic_device object: {schema_path}")
+    if field.get("type") not in (None, "string"):
+        raise ValueError(f"mic_device.type is not string: {field.get('type')!r}")
+    devices = _Recorder.list_input_devices()
+    usable = sum(1 for d in devices if d.get("ok_16k"))
+    logger.info(
+        f"mic device scan: {len(devices)} input device(s), {usable} usable @16 kHz"
+    )
+    defaults = []
+    old_default = field.get("default")
+    if isinstance(old_default, str) and old_default.strip():
+        defaults.append(old_default)
+    options = build_mic_device_options(devices, list(defaults) + list(current_values or []))
+    if field.get("options") == options:
+        return options
+
+    new_text = _upsert_mic_device_options(text, options)
+    json.loads(new_text)  # 写之前确认仍是合法 JSON
+    tmp = schema_path.with_name(schema_path.name + ".tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    os.replace(tmp, schema_path)
+    logger.info(
+        f"mic_device.options updated in {schema_path.name}: "
+        f"{len(options)} item(s) (重启 bot 后 WebUI 下拉生效)"
+    )
+    return options
+
+
+def _upsert_mic_device_options(text: str, options: list[str]) -> str:
+    """在 schema 文本里只替换 mic_device 块的 options 数组，其余逐字不动。"""
+    lines = text.splitlines(keepends=True)
+    start = None
+    indent = ""
+    for i, line in enumerate(lines):
+        m = re.match(r'^(\s*)"mic_device"\s*:\s*\{\s*$', line)
+        if m:
+            start, indent = i, m.group(1)
+            break
+    if start is None:
+        raise ValueError("mic_device block not found in schema.json")
+    close = indent + "}"
+    end = None
+    for j in range(start + 1, len(lines)):
+        if lines[j].rstrip("\r\n") == close or lines[j].rstrip("\r\n") == close + ",":
+            end = j  # mic_device 块的收尾行（可能是 "},"）
+            break
+    if end is None:
+        raise ValueError("mic_device block not terminated in schema.json")
+
+    item_indent = indent + "    "
+    opt_lines = [f'{item_indent}"options": [']
+    for k, opt in enumerate(options):
+        comma = "," if k < len(options) - 1 else ""
+        opt_lines.append(f'{item_indent}    {json.dumps(opt, ensure_ascii=False)}{comma}')
+    opt_lines.append(f"{item_indent}],")
+
+    # 块内已有 options：整段替换；否则插到 "type" 行之后（与其它字段的
+    # name/type/options/default 顺序一致）。收尾行是首个以 "]" 开头的行
+    # （每个选项行都以引号开头，字符串内的 "[" 不会成行首，不受设备名
+    # 含方括号影响）。
+    opts_start = opts_end = None
+    for j in range(start + 1, end):
+        if re.match(r'^"options"\s*:', lines[j].strip()):
+            opts_start = j
+            opts_end = j
+            for k in range(j + 1, end):
+                opts_end = k
+                if lines[k].strip().startswith("]"):
+                    break
+            break
+    if opts_start is not None:
+        trailing = "\r\n" if lines[opts_end].endswith("\r\n") else "\n"
+        if not lines[opts_end].rstrip("\r\n").endswith(","):
+            opt_lines[-1] = opt_lines[-1].rstrip(",")
+        return "".join(lines[:opts_start]) + "".join(l + trailing for l in opt_lines) + "".join(lines[opts_end + 1:])
+
+    for j in range(start + 1, end):
+        if re.match(r'^\s*"type"\s*:', lines[j]):
+            trailing = "\r\n" if lines[j].endswith("\r\n") else "\n"
+            return "".join(lines[:j + 1]) + "".join(l + trailing for l in opt_lines) + "".join(lines[j + 1:])
+    raise ValueError('"type" line not found inside mic_device block')
 
 
 # ─────────────────────────── text helpers ───────────────────────────
@@ -129,16 +324,49 @@ def _foreground_process_name() -> str:
 
 # ─────────────────────────── recorder ───────────────────────────
 
+_DBFS_FLOOR = -120.0  # display floor for digital silence (peak 0)
+
+
+def _to_dbfs(linear: float) -> float:
+    """int16 full-scale-referenced dBFS with a floor for silence."""
+    if linear <= 0:
+        return _DBFS_FLOOR
+    return max(_DBFS_FLOOR, 20.0 * math.log10(linear / 32768.0))
+
+
 class _Recorder:
-    """16 kHz mono int16 wav recorder built on sounddevice.InputStream."""
+    """16 kHz mono int16 wav recorder built on sounddevice.InputStream.
+
+    Applies a per-capture software gain to the int16 frames and tracks
+    peak / RMS (dBFS) of the gain-applied audio — i.e. exactly what gets
+    written to the wav and fed to ASR. Stats are readable via the
+    last_* attributes after stop_and_save().
+    """
 
     SAMPLE_RATE = 16000
+    # A post-gain sample this close to the int16 ceiling counts as clipping.
+    _CLIP_THRESHOLD = 32760.0
 
     def __init__(self):
         self._stream = None
         self._frames: list = []
+        self._gain = 1.0
+        self._device_name = ""
+        self._device_index: int | None = None
+        self._peak = 0.0
+        self._sum_sq = 0.0
+        self._sample_count = 0
+        # Filled in by stop_and_save(); readable afterwards.
+        self.last_peak_dbfs: float = _DBFS_FLOOR
+        self.last_rms_dbfs: float = _DBFS_FLOOR
+        self.last_device_name: str = ""
+        self.last_device_index: int | None = None
+        self.last_clipping: bool = False
+        # start() 时 mic_device 解析产生的非致命警告（如配置的设备没找到、
+        # 已回退系统默认）；调用方负责转存到适配器状态页。
+        self.last_warning: str = ""
 
-    def start(self, device_substring: str = ""):
+    def start(self, device_setting: str = "", gain: float = 1.0):
         import sounddevice as sd
 
         kwargs = {
@@ -147,27 +375,105 @@ class _Recorder:
             "dtype": "int16",
             "callback": self._on_audio,
         }
-        if device_substring:
-            idx = self._find_device(sd, device_substring)
-            if idx is None:
-                raise ValueError(f"microphone device not found: {device_substring!r}")
-            kwargs["device"] = idx
+        # mic_device 值 → 设备 index 的解析规则见 resolve_mic_device（唯一
+        # 权威实现）。找不到设备不抛致命错：回退系统默认并留下警告，让
+        # PTT/试录继续可用（状态页会显示警告）。
+        self.last_warning = ""
+        device_idx: int | None = None
+        setting = str(device_setting or "").strip()
+        if setting:
+            device_idx, _how, warning = resolve_mic_device(setting, sd.query_devices())
+            if warning:
+                self.last_warning = warning
+                logger.warning(warning)
+        if device_idx is None:
+            # 未指定或回退：显式定位系统默认输入，让状态页能看到真实设备名
+            try:
+                device_idx = int(sd.default.device[0])
+            except Exception:
+                device_idx = None
+        if device_idx is not None and device_idx >= 0:
+            kwargs["device"] = device_idx
+        self._device_name = ""
+        self._device_index = None
+        try:
+            if device_idx is not None and device_idx >= 0:
+                info = sd.query_devices(device_idx)
+                self._device_name = str(info.get("name", "") or "")
+                self._device_index = device_idx
+        except Exception:
+            pass
+        if not self._device_name:
+            self._device_name = setting
+        self._gain = float(gain)
         self._frames = []
+        self._peak = 0.0
+        self._sum_sq = 0.0
+        self._sample_count = 0
         self._stream = sd.InputStream(**kwargs)
         self._stream.start()
 
     @staticmethod
-    def _find_device(sd, substring: str):
+    def list_input_devices() -> list[dict]:
+        """Enumerate input devices; ok_16k is verified by actually opening
+        the device at 16 kHz mono int16 (hostapi alone is not reliable)."""
+        import sounddevice as sd
+
+        devices: list[dict] = []
         try:
-            for dev in sd.query_devices():
-                if substring.lower() in dev["name"].lower() and dev["max_input_channels"] > 0:
-                    return dev["index"]
+            raw = sd.query_devices()
+        except Exception as e:
+            logger.warning(f"query_devices failed: {e}")
+            return devices
+        try:
+            default_in = int(sd.default.device[0])
         except Exception:
-            pass
-        return None
+            default_in = -1
+        for dev in raw:
+            try:
+                if int(dev.get("max_input_channels", 0)) <= 0:
+                    continue
+                idx = int(dev.get("index", 0))
+                hostapi = ""
+                try:
+                    hostapi = str(sd.query_hostapis(int(dev.get("hostapi", 0))).get("name", "") or "")
+                except Exception:
+                    pass
+                devices.append({
+                    "index": idx,
+                    "name": str(dev.get("name", "") or ""),
+                    "hostapi": hostapi,
+                    "channels": int(dev.get("max_input_channels", 0)),
+                    "default_samplerate": round(float(dev.get("default_samplerate", 0) or 0)),
+                    "ok_16k": _Recorder._can_open_16k(sd, idx),
+                    "is_default": idx == default_in,
+                })
+            except Exception as e:
+                logger.debug(f"skip device entry during enumeration: {e}")
+        return devices
+
+    @staticmethod
+    def _can_open_16k(sd, index: int) -> bool:
+        try:
+            stream = sd.InputStream(samplerate=16000, channels=1, dtype="int16", device=index)
+            stream.close()
+            return True
+        except Exception:
+            return False
 
     def _on_audio(self, indata, frames, time_info, status):
+        import numpy as np
+
+        if self._gain != 1.0:
+            indata = np.clip(
+                indata.astype(np.float32) * self._gain, -32768.0, 32767.0,
+            ).astype(np.int16)
         self._frames.append(indata.copy())
+        x = indata.reshape(-1).astype(np.float64)
+        if x.size:
+            self._peak = max(self._peak, float(np.max(np.abs(x))))
+            self._sum_sq += float(np.dot(x, x))
+            self._sample_count += x.size
 
     def stop_and_save(self, path: str) -> float:
         """Stop recording, write wav, return duration in seconds."""
@@ -185,6 +491,12 @@ class _Recorder:
             wf.setsampwidth(2)
             wf.setframerate(self.SAMPLE_RATE)
             wf.writeframes(audio.tobytes())
+        self.last_device_name = self._device_name
+        self.last_device_index = self._device_index
+        self.last_peak_dbfs = _to_dbfs(self._peak)
+        rms = math.sqrt(self._sum_sq / self._sample_count) if self._sample_count else 0.0
+        self.last_rms_dbfs = _to_dbfs(rms)
+        self.last_clipping = self._peak >= self._CLIP_THRESHOLD
         return duration
 
 
@@ -1019,11 +1331,13 @@ class VRChatAdapter(BaseAdapter):
             logger.debug(f"ptt_down ignored in state={self._state}")
             return
         try:
-            self._recorder.start(self.config.get("mic_device", ""))
+            self._recorder.start(self.config.get("mic_device", ""), gain=self._mic_gain())
         except Exception as e:
             self.last_error = f"recorder start failed: {e}"
             logger.error(self.last_error)
             return
+        if self._recorder.last_warning:
+            self.last_error = self._recorder.last_warning
         self._set_state("recording")
         self._record_started_at = time.time()
         timeout = int(self.config.get("max_record_seconds", 60))
@@ -1047,7 +1361,7 @@ class VRChatAdapter(BaseAdapter):
 
         text = result.get("text") or ""
         if not text or len(text) < 2 or _is_hallucination(text):
-            logger.info(f"ASR empty/hallucination: {text!r}")
+            logger.info(f"ASR empty/hallucination: {text!r} {result.get('error', '')}".rstrip())
             if self._sender:
                 self._sender.set_typing(False)
             self._set_state("idle")
@@ -1081,10 +1395,15 @@ class VRChatAdapter(BaseAdapter):
             self._set_state("idle")
             return {"ok": False, "error": f"recorder stop failed: {e}"}
 
+        levels = {
+            "peak_dbfs": round(self._recorder.last_peak_dbfs, 1),
+            "rms_dbfs": round(self._recorder.last_rms_dbfs, 1),
+            "device": self._recorder.last_device_name,
+        }
         if duration < 0.5:
             Path(wav_path).unlink(missing_ok=True)
             self._set_state("idle")
-            return {"ok": False, "error": "recording too short, discarded"}
+            return {"ok": False, "error": "recording too short, discarded", **levels}
 
         self._set_state("transcribing")
         if self._sender:
@@ -1104,7 +1423,16 @@ class VRChatAdapter(BaseAdapter):
         finally:
             Path(wav_path).unlink(missing_ok=True)
 
-        return {"ok": True, "text": _strip_noise(text), "duration": round(duration, 2)}
+        text = _strip_noise(text)
+        result = {"ok": True, "text": text, "duration": round(duration, 2), **levels}
+        if not text and result["peak_dbfs"] < -50.0:
+            # 数字静音：几乎一定是设备/系统音量问题，而不是「说话太小声」
+            result["error"] = (
+                f"输入电平极低（peak {result['peak_dbfs']:.1f} dBFS）：当前设备"
+                f"「{levels['device'] or '未知'}」可能选错或系统输入音量为 0；"
+                "请在状态页用「设备电平探测」换一个设备，或调大 mic_gain。"
+            )
+        return result
 
     async def _auto_stop(self, seconds: int):
         await asyncio.sleep(seconds)
@@ -1159,10 +1487,12 @@ class VRChatAdapter(BaseAdapter):
             return {"ok": False, "error": f"adapter busy: {self._state}"}
         logger.info(f"test_record: recording {seconds}s")
         try:
-            self._recorder.start(self.config.get("mic_device", ""))
+            self._recorder.start(self.config.get("mic_device", ""), gain=self._mic_gain())
         except Exception as e:
             logger.error(f"test_record recorder start failed: {e}")
             return {"ok": False, "error": f"recorder start failed: {e}"}
+        if self._recorder.last_warning:
+            self.last_error = self._recorder.last_warning
         self._set_state("recording")
         self._record_started_at = time.time()
         try:
@@ -1181,9 +1511,18 @@ class VRChatAdapter(BaseAdapter):
             return result
 
         text = result.get("text") or ""
-        logger.info(f"test_record done: {text!r}")
+        logger.info(f"test_record done: {text!r} peak={result.get('peak_dbfs')} dBFS")
         self._set_state("idle")
-        return {"ok": True, "duration": result.get("duration", 0), "text": text}
+        return {
+            "ok": True,
+            "duration": result.get("duration", 0),
+            "text": text,
+            "peak_dbfs": result.get("peak_dbfs"),
+            "rms_dbfs": result.get("rms_dbfs"),
+            "device": result.get("device", ""),
+            "warning": self._recorder.last_warning,
+            "error": result.get("error", ""),
+        }
 
     def force_reset(self) -> dict:
         """Recover from a stuck state (status page '强制复位')."""
@@ -1208,6 +1547,105 @@ class VRChatAdapter(BaseAdapter):
         self.last_error = ""
         logger.warning(f"force_reset: {prev} -> idle")
         return {"ok": True, "previous_state": prev, "state": self._state}
+
+    # ── mic diagnostics (status page) ──
+
+    def _mic_gain(self) -> float:
+        """Configured mic gain, clamped to the schema range (0.5..20)."""
+        try:
+            gain = float(self.config.get("mic_gain", 1.0))
+        except (TypeError, ValueError):
+            gain = 1.0
+        if gain <= 0:
+            gain = 1.0
+        return min(20.0, max(0.5, gain))
+
+    def _mic_device_resolution(self) -> dict:
+        """当前 mic_device 配置值的解析结果，供状态页展示。
+
+        只查询设备表（不开流、不录音），因此可以随 /status 轮询；解析产生
+        的「未找到设备」警告在这里只随数据返回，不打日志（避免轮询刷屏），
+        真正开麦时的警告由 _Recorder.start 记录。
+        """
+        value = str(self.config.get("mic_device", "") or "")
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+        except Exception as e:
+            return {"configured": value, "index": None, "name": "", "how": "error", "warning": str(e)}
+        idx, how, warning = resolve_mic_device(value, devices)
+        name = ""
+        try:
+            if idx is not None:
+                name = str(sd.query_devices(idx).get("name", "") or "")
+            else:
+                dflt = int(sd.default.device[0])
+                if dflt >= 0:
+                    name = str(sd.query_devices(dflt).get("name", "") or "")
+        except Exception:
+            pass
+        return {"configured": value, "index": idx, "name": name, "how": how, "warning": warning}
+
+    def list_input_devices(self) -> dict:
+        try:
+            return {"ok": True, "devices": _Recorder.list_input_devices()}
+        except Exception as e:
+            logger.error(f"list_input_devices failed: {e}")
+            return {"ok": False, "error": f"设备枚举失败: {e}", "devices": []}
+
+    async def probe_device(self, device: str = "", seconds: float = 2.0, gain: float = 0.0) -> dict:
+        """Record a short clip on the given device — level metering only, no ASR.
+
+        gain <= 0 means "use the configured mic_gain".
+        """
+        seconds = max(1.0, min(10.0, float(seconds or 2.0)))
+        if not gain or float(gain) <= 0:
+            gain = self._mic_gain()
+        else:
+            gain = min(20.0, max(0.5, float(gain)))
+        if self._state != "idle":
+            return {"ok": False, "error": f"adapter busy: {self._state}", "device": device}
+        # 状态页可能在适配器 start() 之前就点到「测电平」：先确保临时目录存在
+        try:
+            self._wav_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.debug(f"probe_device tmp dir ensure failed: {e}")
+        rec = _Recorder()
+        try:
+            rec.start(device, gain=gain)
+        except Exception as e:
+            logger.warning(f"probe_device open failed ({device!r}): {e}")
+            return {
+                "ok": False,
+                "device": device,
+                "error": f"无法以 16 kHz 打开设备「{device or '系统默认'}」: {e}",
+            }
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            try:
+                rec.stop_and_save(str(self._wav_dir / "probe_cancel.wav"))
+            except Exception:
+                pass
+            raise
+        wav_path = str(self._wav_dir / "probe.wav")
+        try:
+            rec.stop_and_save(wav_path)
+        except Exception as e:
+            logger.error(f"probe_device stop failed: {e}")
+            return {"ok": False, "device": device, "error": f"recorder stop failed: {e}"}
+        Path(wav_path).unlink(missing_ok=True)
+        return {
+            "ok": True,
+            "device": rec.last_device_name,
+            "device_index": rec.last_device_index,
+            "seconds": round(seconds, 2),
+            "gain": gain,
+            "peak_dbfs": round(rec.last_peak_dbfs, 1),
+            "rms_dbfs": round(rec.last_rms_dbfs, 1),
+            "clipping": rec.last_clipping,
+            "warning": rec.last_warning,
+        }
 
     # ── ASR dispatch ──
 
@@ -1300,6 +1738,13 @@ class VRChatAdapter(BaseAdapter):
             "sent_count": self._sender.sent_count if self._sender else 0,
             "record_elapsed": record_elapsed,
             "max_record_seconds": int(self.config.get("max_record_seconds", 60)),
+            "mic_device": str(self.config.get("mic_device", "") or ""),
+            "mic_device_resolved": self._mic_device_resolution(),
+            "mic_device_name": self._recorder.last_device_name,
+            "mic_gain": self._mic_gain(),
+            "last_peak_dbfs": round(self._recorder.last_peak_dbfs, 1),
+            "last_rms_dbfs": round(self._recorder.last_rms_dbfs, 1),
+            "last_clipping": self._recorder.last_clipping,
             "send_interval": float(self.config.get("send_interval", 2)),
             "read_chars_per_second": float(self.config.get("read_chars_per_second", 5) or 5),
             "max_segment_interval": float(self.config.get("max_segment_interval", 8) or 8),

@@ -210,6 +210,36 @@ body {
     min-height: 1.2em;
 }
 
+.mic-current {
+    font-size: 13px;
+    margin-bottom: 10px;
+    word-break: break-all;
+}
+
+.mic-warn {
+    border: 1px solid color-mix(in srgb, var(--err) 40%, var(--line));
+    background: color-mix(in srgb, var(--err) 8%, var(--panel));
+    color: var(--err);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-size: 13px;
+    margin-bottom: 10px;
+}
+
+.mic-hint {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 10px 0 0;
+}
+
+.lv-ok { color: var(--ok); font-size: 12px; }
+.lv-mid { color: var(--warn); font-size: 12px; }
+.lv-low { color: var(--err); font-size: 12px; }
+
+.dev-ok { color: var(--ok); }
+.dev-bad { color: var(--err); font-size: 12px; }
+.dev-name { max-width: 340px; word-break: break-all; }
+
 .table {
     width: 100%;
     border-collapse: collapse;

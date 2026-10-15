@@ -11,7 +11,9 @@ Config lives on the adapter instance (WebUI -> Adapters -> VRChat instance).
 """
 
 import html
+import importlib.util
 import sys
+from pathlib import Path
 
 from core.plugin import BasePlugin, logger, on, register, PluginPage, PageMenu
 from core.prompt_manager import Prompt
@@ -27,8 +29,46 @@ _VRCHAT_CONTEXT_PROMPT = """\
 """
 
 
+_PLUGIN_ROOT = Path(__file__).resolve().parent
+
+
+def _load_adapter_component():
+    """按路径加载 adapter/adapter.py（私有模块名），供 schema 刷新使用。
+
+    框架注册适配器时会用自己的模块名再加载一份，两份互不影响：这里的
+    副本只用于在注册前调用 refresh_mic_device_options，运行期实例由框架
+    副本承载。加载失败返回 None，调用方自行兜底。
+    """
+    name = "_vrclink_adapter_component"
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod
+    script = _PLUGIN_ROOT / "adapter" / "adapter.py"
+    if not script.is_file():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(name, script)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception as e:
+        sys.modules.pop(name, None)
+        logger.debug(f"VRCLink: load adapter component for schema refresh failed: {e}")
+        return None
+
+
 class VRCLinkPlugin(BasePlugin):
     async def initialize(self):
+        # 框架只在 register_adapter 时静态读一次 schema.json（无动态选项
+        # 机制），所以必须抢在注册前把本机麦克风列表写进 mic_device.options，
+        # WebUI 才能把该字段渲染成下拉。失败绝不能阻断插件初始化。
+        try:
+            self._refresh_schema_mic_options()
+        except Exception as e:
+            logger.warning(f"VRCLink: refresh mic_device options failed (ignored): {e}")
         # Config hot-reload re-runs initialize(); re-registering the same
         # platform path is a no-op, only surface unexpected failures.
         try:
@@ -70,6 +110,48 @@ class VRCLinkPlugin(BasePlugin):
         ))
 
     # ── helpers ──
+
+    def _refresh_schema_mic_options(self):
+        """把本机麦克风列表写进 adapter/schema.json 的 mic_device.options。
+
+        必须发生在 register_adapter 之前（框架只在注册时读一次 schema）。
+        写入本身是幂等的：设备没变化时不落盘。
+        """
+        mod = _load_adapter_component()
+        refresh = getattr(mod, "refresh_mic_device_options", None)
+        if refresh is None:
+            logger.debug("VRCLink: adapter component unavailable, skip mic options refresh")
+            return
+        options = refresh(
+            _PLUGIN_ROOT / "adapter" / "schema.json",
+            self._collect_configured_mic_devices(),
+        )
+        logger.info(
+            f"VRCLink: mic_device options ready ({len(options)} 项，含系统默认哨兵)；"
+            "已写入 schema，重启 bot 后适配器配置页下拉更新"
+        )
+
+    def _collect_configured_mic_devices(self) -> list[str]:
+        """已保存的适配器实例 mic_device 值，保证它们留在 options 里。
+
+        否则 WebUI 的下拉框/保存校验会把「不在选项里的已保存值」洗成默认项。
+        """
+        values: list[str] = []
+        try:
+            config = getattr(self.ctx, "config", None) or {}
+            adapters = config.get("adapters", {}) or {}
+            for entry in adapters.values():
+                if not isinstance(entry, dict):
+                    continue
+                cfg = entry.get("config")
+                if not isinstance(cfg, dict):
+                    continue
+                v = str(cfg.get("mic_device", "") or "").strip()
+                if v:
+                    values.append(v)
+        except Exception as e:
+            logger.debug(f"VRCLink: collect configured mic_device failed: {e}")
+        return values
 
     def _get_stt(self, model_uuid: str = ""):
         """Resolve an STT client.
@@ -155,6 +237,56 @@ class VRCLinkPlugin(BasePlugin):
         if err:
             return err
         return await ada.test_record(seconds)
+
+    @register.api(method="GET", path="/input-devices")
+    async def api_input_devices(self):
+        ada, err = self._require_adapter("list_input_devices")
+        if err:
+            return err
+        return ada.list_input_devices()
+
+    @register.api(method="POST", path="/refresh-devices")
+    async def api_refresh_devices(self):
+        """重扫本机麦克风并写入 schema 的 mic_device.options。
+
+        schema 是适配器注册时一次性读入的，所以下拉列表要等重启 bot（或
+        禁用/启用插件）才更新——note 字段里如实告知前端。
+        """
+        note = (
+            "已把当前设备列表写入 adapter/schema.json（mic_device.options）。"
+            "重启 bot（或在 WebUI 禁用再启用本插件）后，适配器配置页的下拉列表才会更新；"
+            "本页的设备列表与「测电平」按钮即时可用。"
+        )
+        empty = {"ok": False, "options": [], "devices": [], "note": note}
+        try:
+            mod = _load_adapter_component()
+            refresh = getattr(mod, "refresh_mic_device_options", None)
+            if refresh is None:
+                empty["error"] = "adapter component not loadable"
+                return empty
+            options = refresh(
+                _PLUGIN_ROOT / "adapter" / "schema.json",
+                self._collect_configured_mic_devices(),
+            )
+        except Exception as e:
+            logger.warning(f"VRCLink: refresh-devices failed: {e}")
+            empty["error"] = f"刷新失败: {e}"
+            return empty
+        ada, _err = self._require_adapter("list_input_devices")
+        devices = []
+        if ada is not None:
+            try:
+                devices = ada.list_input_devices().get("devices", [])
+            except Exception as e:
+                logger.debug(f"VRCLink: device enumeration failed: {e}")
+        return {"ok": True, "options": options, "devices": devices, "note": note}
+
+    @register.api(method="POST", path="/probe-device")
+    async def api_probe_device(self, device: str = "", seconds: float = 2.0, gain: float = 0.0):
+        ada, err = self._require_adapter("probe_device")
+        if err:
+            return err
+        return await ada.probe_device(device=device, seconds=seconds, gain=gain)
 
     @register.api(method="POST", path="/force-reset")
     async def api_force_reset(self):
