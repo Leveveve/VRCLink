@@ -10,7 +10,7 @@ Flow (inbound from VRChat):
     global hotkey / VR controller key (via OVR Advanced Settings Key Press,
     which synthesizes the same OS-level key) -> pynput listener
         -> record 16kHz mono wav via sounddevice
-        -> ASR (faster-whisper locally, or KiraAI default STT provider)
+        -> speech-to-text via a KiraAI-configured cloud STT provider
         -> IMCapability.publish -> KiraMessageEvent(adapter, dm, is_mentioned=True)
 """
 
@@ -36,16 +36,16 @@ from core.utils.path_utils import get_data_path
 
 logger = get_logger("VRChat", "purple")
 
-# Whisper output sometimes hallucinates these on silence / short clips.
-_HALLUCINATION_PATTERNS = (
-    "谢谢观看", "感谢观看", "请订阅", "字幕由", "字幕by", "by amara.org",
-    "subtitles by", "谢谢收看", "请点赞",
-)
-
 CHATBOX_LIMIT = 140  # VRChat hard limit is 144; leave headroom
-_HF_MIRROR = "https://hf-mirror.com"
 # Plugin data folder name under <data>/plugin_data/ (stable across bots).
 PLUGIN_DATA_NAME = "vrclink"
+
+# Pre-1.0.0 config keys removed in 1.0.0 (local ASR dropped for cloud STT).
+_LEGACY_ASR_KEYS = (
+    "asr_backend", "whisper_model", "whisper_language", "whisper_compute",
+    "whisper_download_root", "hf_endpoint", "asr_load_timeout_seconds",
+    "cloud_stt_model",
+)
 
 # mic_device 下拉列表的首个哨兵项：选中它（或配置为空串）= 不指定设备，
 # sounddevice 用 Windows 系统默认输入。value 即该字符串本身。
@@ -296,9 +296,54 @@ def _split_segments(text: str, limit: int = CHATBOX_LIMIT) -> list[str]:
     return segments
 
 
+# ASR providers occasionally emit these on silence / short clips; treat as no
+# speech so the pipeline is never fed junk input.
+_HALLUCINATION_PATTERNS = (
+    "谢谢观看", "感谢观看", "请订阅", "字幕由", "字幕by", "by amara.org",
+    "subtitles by", "谢谢收看", "请点赞",
+)
+
+
 def _is_hallucination(text: str) -> bool:
     low = text.lower()
     return any(p in low for p in _HALLUCINATION_PATTERNS)
+
+
+def _summarize_error(e: Exception, limit: int = 200) -> str:
+    """One-line readable summary of an STT exception, truncated."""
+    msg = re.sub(r"\s+", " ", str(e) or type(e).__name__).strip()
+    return msg[:limit]
+
+
+def migrate_legacy_asr_config(config: dict) -> dict | None:
+    """Drop pre-1.0.0 local-ASR keys; carry `cloud_stt_model` into `stt_model`.
+
+    Mutates `config` in place and returns it, or None when nothing changed
+    (idempotent: a second run on already-migrated config returns None).
+    The plugin calls this against `ctx.config["adapters"][id]["config"]` and
+    persists via `kira_config.save_config()` — no direct file writing here.
+    """
+    if not isinstance(config, dict):
+        return None
+    changed = False
+    if not str(config.get("stt_model", "") or "").strip():
+        legacy = str(config.get("cloud_stt_model", "") or "").strip()
+        if legacy:
+            config["stt_model"] = legacy
+            changed = True
+    if config.pop("asr_backend", None) is not None:
+        changed = True
+    for key in _LEGACY_ASR_KEYS:
+        if key == "asr_backend":
+            continue
+        if key == "cloud_stt_model":
+            # Remove only after its value has been carried over above.
+            if config.pop("cloud_stt_model", None) is not None:
+                changed = True
+            continue
+        if config.pop(key, None) is not None:
+            changed = True
+    return config if changed else None
 
 
 def _foreground_process_name() -> str:
@@ -718,262 +763,6 @@ class _ChatboxSender:
             await asyncio.sleep(self._gap_for(seg))
 
 
-# ─────────────────────────── ASR backends ───────────────────────────
-
-def _apply_hf_endpoint(endpoint: str):
-    """Point huggingface_hub at a mirror when huggingface.co is unreachable.
-
-    Must be set before the first snapshot_download / model load.
-    Xet transport often 401s through mirrors, so disable it unless the user
-    opted in via HF_HUB_DISABLE_XET=0.
-    """
-    endpoint = (endpoint or "").strip()
-    if endpoint:
-        os.environ["HF_ENDPOINT"] = endpoint.rstrip("/")
-    elif "HF_ENDPOINT" not in os.environ:
-        os.environ["HF_ENDPOINT"] = _HF_MIRROR
-    if os.environ.get("HF_HUB_DISABLE_XET", "") not in ("0", "false", "False"):
-        os.environ["HF_HUB_DISABLE_XET"] = "1"
-
-
-_CUDA_DLL_PATHS_APPLIED = False
-
-# ctranslate2 links these CUDA runtime DLLs at inference time. Names match the
-# pip packages in the bot venv (nvidia-cublas-cu12 / nvidia-cudnn-cu12 /
-# nvidia-cuda-nvrtc-cu12); each load checks existence first, so a version bump
-# that renames a file just skips it and degrades to the CPU fallback as before.
-_CTRANSLATE2_CUDA_DLLS = (
-    "cublas64_12.dll",
-    "cublasLt64_12.dll",
-    "cudnn64_9.dll",
-    "nvrtc64_120_0.dll",
-)
-
-
-def _ensure_cuda_dll_paths():
-    """Register NVIDIA DLL dirs and preload what ctranslate2 links against.
-
-    os.add_dll_directory alone is NOT enough: it only affects loaders using
-    LOAD_LIBRARY_SEARCH_USER_DIRS (i.e. Python's own extension imports).
-    ctranslate2 resolves cublas64_12.dll etc. with its own plain LoadLibrary
-    call, which ignores those dirs — hence the explicit preload by full path.
-    Once a DLL is loaded in-process, ctranslate2's by-name LoadLibrary finds
-    it via the loaded-module cache without any path search. cudnn64_9.dll's
-    sub-DLLs (cudnn_ops64_9.dll & co.) resolve from its own directory because
-    WinDLL on an absolute path implies LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR.
-    """
-    global _CUDA_DLL_PATHS_APPLIED
-    if _CUDA_DLL_PATHS_APPLIED:
-        return
-    import ctypes
-    import sys
-
-    bins: list[Path] = []
-    try:
-        sp = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
-        if sp.is_dir():
-            for sub in sp.iterdir():
-                b = sub / "bin"
-                if b.is_dir():
-                    bins.append(b)
-    except Exception:
-        pass
-
-    extra = os.environ.get("VRCHAT_BRIDGE_CUDA_BIN", "")
-    if extra and Path(extra).is_dir():
-        bins.append(Path(extra))
-
-    for b in bins:
-        try:
-            os.add_dll_directory(str(b))
-        except Exception as e:
-            logger.debug(f"add_dll_directory({b}) failed: {e}")
-
-    for b in bins:
-        for name in _CTRANSLATE2_CUDA_DLLS:
-            p = b / name
-            if not p.is_file():
-                continue
-            try:
-                ctypes.WinDLL(str(p))
-                logger.debug(f"preloaded CUDA dll: {p}")
-            except Exception as e:
-                logger.debug(f"CUDA dll preload failed ({p}): {e}")
-
-    if bins:
-        _CUDA_DLL_PATHS_APPLIED = True
-        logger.debug(f"CUDA DLL dirs registered: {[str(b) for b in bins]}")
-    else:
-        logger.warning("no pip NVIDIA bin dirs found; GPU inference may fail")
-
-
-class _LocalWhisper:
-    """faster-whisper backend with lazy model load and CUDA->CPU fallback."""
-
-    def __init__(
-        self,
-        model_name: str,
-        compute: str,
-        language: str,
-        hf_endpoint: str = _HF_MIRROR,
-        download_root: str = "",
-    ):
-        self.model_name = model_name
-        self.compute = compute
-        self.language = language
-        self.hf_endpoint = hf_endpoint
-        self.download_root = download_root
-        self._model = None
-        self._device_used = ""
-        self.status = "not_loaded"  # not_loaded | loading | loaded | failed
-        self.last_error = ""
-        self._loading = False
-
-    def _resolve_model_path(self) -> str:
-        """Local dir path, HF cache hit, or download from the Hub."""
-        if self.model_name and Path(self.model_name).is_dir():
-            return self.model_name
-
-        from faster_whisper.utils import available_models
-
-        if self.model_name not in available_models():
-            return self.model_name
-
-        try:
-            import huggingface_hub
-            from faster_whisper.utils import _MODELS
-
-            repo_id = _MODELS.get(self.model_name, self.model_name)
-            path = huggingface_hub.snapshot_download(
-                repo_id=repo_id,
-                cache_dir=self.download_root or None,
-                local_files_only=True,
-            )
-            logger.info(f"whisper model cache hit: {path}")
-            return path
-        except Exception:
-            pass
-
-        from faster_whisper.utils import download_model
-
-        try:
-            return download_model(
-                self.model_name,
-                cache_dir=self.download_root or None,
-                local_files_only=False,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"模型下载失败（{self.model_name}）：{e}。"
-                f"当前 HF_ENDPOINT={os.environ.get('HF_ENDPOINT', '')}。"
-                "可把 hf_endpoint 设为 https://hf-mirror.com，"
-                "或改用较小模型（small/medium），或切换 asr_backend=cloud。"
-            ) from e
-
-    def _load_on(self, path: str, device: str, compute: str):
-        from faster_whisper import WhisperModel
-
-        kwargs = {}
-        if self.download_root:
-            kwargs["download_root"] = self.download_root
-        self._model = WhisperModel(path, device=device, compute_type=compute, **kwargs)
-        self._device_used = f"{device}/{compute}"
-
-    def _warmup(self) -> bool:
-        """Tiny inference so missing CUDA libs surface at load time."""
-        import struct
-        import tempfile
-
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp = f.name
-            frames = b"".join(struct.pack("<h", 0) for _ in range(int(16000 * 0.3)))
-            with wave.open(tmp, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(16000)
-                w.writeframes(frames)
-            segs, _ = self._model.transcribe(tmp, beam_size=1, vad_filter=False)
-            list(segs)
-            Path(tmp).unlink(missing_ok=True)
-            return True
-        except Exception as e:
-            logger.warning(f"whisper warmup failed: {e}")
-            return False
-
-    def _load(self):
-        if self._model is not None:
-            return
-        if self._loading:
-            raise RuntimeError("model load already in progress")
-        self._loading = True
-        self.status = "loading"
-        self.last_error = ""
-        try:
-            _apply_hf_endpoint(self.hf_endpoint)
-            _ensure_cuda_dll_paths()
-            path = self._resolve_model_path()
-            try:
-                self._load_on(path, "cuda", self.compute)
-                if not self._warmup():
-                    raise RuntimeError("CUDA warmup inference failed")
-            except Exception as e:
-                logger.warning(f"CUDA load failed ({e}); falling back to CPU int8")
-                self._model = None
-                self._load_on(path, "cpu", "int8")
-            self.status = "loaded"
-            logger.info(f"whisper model loaded: {self.model_name} on {self._device_used}")
-        except Exception as e:
-            self.status = "failed"
-            if not self.last_error:
-                self.last_error = str(e)
-            self._model = None
-            raise
-        finally:
-            self._loading = False
-
-    def _fallback_to_cpu(self, reason: str):
-        """Drop the CUDA model and reload on CPU (missing cublas etc.)."""
-        logger.warning(f"switching whisper to CPU: {reason}")
-        self._model = None
-        self._device_used = ""
-        self.status = "loading"
-        try:
-            _apply_hf_endpoint(self.hf_endpoint)
-            _ensure_cuda_dll_paths()
-            path = self._resolve_model_path()
-            self._load_on(path, "cpu", "int8")
-            self.status = "loaded"
-            self.last_error = ""
-            logger.info(f"whisper reloaded on CPU after: {reason}")
-        except Exception as e:
-            self.status = "failed"
-            self.last_error = str(e)
-            self._model = None
-            raise
-
-    async def transcribe(self, wav_path: str) -> str:
-        if self._model is None:
-            await asyncio.to_thread(self._load)
-
-        def _run() -> str:
-            kwargs = {"beam_size": 5, "vad_filter": True}
-            if self.language and self.language.lower() != "auto":
-                kwargs["language"] = self.language
-            try:
-                segments, _info = self._model.transcribe(wav_path, **kwargs)
-                return "".join(s.text for s in segments).strip()
-            except Exception as e:
-                msg = str(e).lower()
-                if any(k in msg for k in ("cublas", "cudnn", "cuda", "dll")):
-                    self._fallback_to_cpu(str(e))
-                    segments, _info = self._model.transcribe(wav_path, **kwargs)
-                    return "".join(s.text for s in segments).strip()
-                raise
-
-        return await asyncio.to_thread(_run)
-
-
 # ─────────────────────────── the adapter ───────────────────────────
 
 # 插件 main.py 的 initialize() 注入的云端 STT getter（模块级兜底）：
@@ -1044,7 +833,6 @@ class VRChatAdapter(BaseAdapter):
         self._hotkey: _HotkeyWatcher | None = None
         self._recorder = _Recorder()
         self._sender: _ChatboxSender | None = None
-        self._whisper: _LocalWhisper | None = None
         self._state = "idle"  # idle -> recording -> transcribing -> sending
         self._state_since = time.time()
         # 状态代数：force_reset / 看门狗复位时自增；_ptt_up 进入时捕获，
@@ -1068,6 +856,8 @@ class VRChatAdapter(BaseAdapter):
         # Signature: getter(model_uuid: str = "") -> STTModelClient | None
         #   empty model_uuid = KiraAI default STT; "provider_id:model_id" = specific.
         self._stt_provider = None
+        # STT client resolved by the last _transcribe() call (for display).
+        self._last_stt_client = None
         # start() 即运行协程（core/adapter/base.py:146-155），return 会被判定
         # run 结束并把实例从注册表摘除（adapter_registry.py:524-551），见 start() 末尾。
         self._stop_event: asyncio.Event | None = None
@@ -1111,10 +901,6 @@ class VRChatAdapter(BaseAdapter):
             max_interval=float(cfg.get("max_segment_interval", 8) or 8),
         )
         self._sender.start()
-
-        if (cfg.get("asr_backend", "local")) == "local":
-            self._whisper = self._make_whisper()
-            self._tasks.append(asyncio.create_task(self._preload_whisper()))
 
         spec = cfg.get("hotkey", "b")
         loop = asyncio.get_running_loop()
@@ -1163,7 +949,6 @@ class VRChatAdapter(BaseAdapter):
             except Exception:
                 pass
         self._set_state("idle")
-        self._whisper = None  # free VRAM
         self._stt_provider = None
         logger.info("VRChat adapter stopped")
 
@@ -1182,38 +967,6 @@ class VRChatAdapter(BaseAdapter):
         if state != self._state:
             self._state = state
             self._state_since = time.time()
-
-    def _make_whisper(self) -> _LocalWhisper:
-        cfg = self.config
-        return _LocalWhisper(
-            model_name=cfg.get("whisper_model", "large-v3-turbo"),
-            compute=cfg.get("whisper_compute", "int8_float16"),
-            language=cfg.get("whisper_language", "zh"),
-            hf_endpoint=str(cfg.get("hf_endpoint", _HF_MIRROR) or ""),
-            download_root=str(cfg.get("whisper_download_root", "") or ""),
-        )
-
-    def _asr_load_timeout(self) -> int:
-        try:
-            return max(30, min(1800, int(self.config.get("asr_load_timeout_seconds", 600))))
-        except Exception:
-            return 600
-
-    async def _preload_whisper(self):
-        timeout = self._asr_load_timeout()
-        try:
-            await asyncio.wait_for(asyncio.to_thread(self._whisper._load), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.error(f"whisper preload timed out after {timeout}s")
-            self.last_error = f"whisper 模型加载超时（{timeout}s），首次识别时会重试"
-            self._whisper._model = None
-            self._whisper.status = "failed"
-            self._whisper.last_error = self.last_error
-        except Exception as e:
-            logger.error(f"whisper preload failed (will retry on first use): {e}")
-            self._whisper._model = None
-            self._whisper.status = "failed"
-            self._whisper.last_error = str(e)
 
     async def _state_watchdog(self):
         """If recording/transcribing sticks around too long, force a reset."""
@@ -1382,8 +1135,11 @@ class VRChatAdapter(BaseAdapter):
         self._arm_send_timeout()
 
     async def _stop_record_and_transcribe(self) -> dict:
-        """Shared by PTT and status-page test: stop mic, save wav, ASR, cleanup.
+        """Shared by PTT and status-page test: stop mic, save wav, STT, cleanup.
 
+        Silence skip: when the recorded peak is below `silence_skip_dbfs`
+        (0 disables the check) the clip is judged as no speech and the STT
+        request is never sent — saves quota and avoids hallucinated text.
         On success the adapter is left in `transcribing` (caller decides next
         state). On failure the adapter is left in `idle`.
         """
@@ -1405,18 +1161,38 @@ class VRChatAdapter(BaseAdapter):
             self._set_state("idle")
             return {"ok": False, "error": "recording too short, discarded", **levels}
 
+        # Silence skip: peak below threshold means nothing audible was captured.
+        try:
+            skip_threshold = float(self.config.get("silence_skip_dbfs", -55.0))
+        except (TypeError, ValueError):
+            skip_threshold = -55.0
+        if skip_threshold != 0 and levels["peak_dbfs"] < skip_threshold:
+            Path(wav_path).unlink(missing_ok=True)
+            self.last_error = (
+                f"输入电平过低（peak {levels['peak_dbfs']:.1f} dBFS），已跳过识别；"
+                "请换麦克风或调大 gain"
+            )
+            logger.info(self.last_error)
+            self._set_state("idle")
+            return {"ok": False, "error": self.last_error, "skipped_silent": True, **levels}
+
         self._set_state("transcribing")
         if self._sender:
             self._sender.set_typing(True)
         try:
             text = await self._transcribe(wav_path)
         except asyncio.TimeoutError:
-            self.last_error = "ASR 超时（模型下载或推理过久）"
+            timeout = self._stt_timeout_seconds()
+            self.last_error = (
+                f"STT 超时（{timeout}s）：{self._stt_display_name() or '未配置 STT 模型'}"
+            )
             logger.error(self.last_error)
             self._set_state("idle")
             return {"ok": False, "error": self.last_error}
         except Exception as e:
-            self.last_error = f"ASR failed: {e}"
+            # All STT failures (timeout / 401 / quota / network) surface here:
+            # never send anything, never guess text — log + status page only.
+            self.last_error = f"STT 失败：{_summarize_error(e)}"
             logger.error(self.last_error)
             self._set_state("idle")
             return {"ok": False, "error": self.last_error}
@@ -1424,15 +1200,7 @@ class VRChatAdapter(BaseAdapter):
             Path(wav_path).unlink(missing_ok=True)
 
         text = _strip_noise(text)
-        result = {"ok": True, "text": text, "duration": round(duration, 2), **levels}
-        if not text and result["peak_dbfs"] < -50.0:
-            # 数字静音：几乎一定是设备/系统音量问题，而不是「说话太小声」
-            result["error"] = (
-                f"输入电平极低（peak {result['peak_dbfs']:.1f} dBFS）：当前设备"
-                f"「{levels['device'] or '未知'}」可能选错或系统输入音量为 0；"
-                "请在状态页用「设备电平探测」换一个设备，或调大 mic_gain。"
-            )
-        return result
+        return {"ok": True, "text": text, "duration": round(duration, 2), **levels}
 
     async def _auto_stop(self, seconds: int):
         await asyncio.sleep(seconds)
@@ -1505,18 +1273,27 @@ class VRChatAdapter(BaseAdapter):
             self._set_state("idle")
             raise
 
+        t0 = time.time()
         result = await self._stop_record_and_transcribe()
+        elapsed_ms = int(round((time.time() - t0) * 1000))
         if not result.get("ok"):
             logger.info(f"test_record failed: {result.get('error')}")
+            result.setdefault("elapsed_ms", elapsed_ms)
+            result.setdefault("stt_display", self._stt_display_name())
             return result
 
         text = result.get("text") or ""
-        logger.info(f"test_record done: {text!r} peak={result.get('peak_dbfs')} dBFS")
+        logger.info(
+            f"test_record done: {text!r} peak={result.get('peak_dbfs')} dBFS "
+            f"stt={self._stt_display_name() or 'default'} {elapsed_ms}ms"
+        )
         self._set_state("idle")
         return {
             "ok": True,
             "duration": result.get("duration", 0),
             "text": text,
+            "elapsed_ms": elapsed_ms,
+            "stt_display": self._stt_display_name(),
             "peak_dbfs": result.get("peak_dbfs"),
             "rms_dbfs": result.get("rms_dbfs"),
             "device": result.get("device", ""),
@@ -1647,38 +1424,75 @@ class VRChatAdapter(BaseAdapter):
             "warning": rec.last_warning,
         }
 
-    # ── ASR dispatch ──
+    # ── STT dispatch (cloud only) ──
+
+    def _stt_timeout_seconds(self) -> int:
+        try:
+            return max(5, min(120, int(self.config.get("stt_timeout_seconds", 20))))
+        except (TypeError, ValueError):
+            return 20
+
+    def _stt_display_name(self) -> str:
+        """Human-readable name of the last resolved STT client, for errors."""
+        client = getattr(self, "_last_stt_client", None)
+        if client is None:
+            return ""
+        info = getattr(client, "model", None)
+        if info is None:
+            return ""
+        parts = [getattr(info, "model_name", "") or "", getattr(info, "provider_name", "") or ""]
+        return "（".join(p for p in parts if p).join(["", "）"]) if any(parts) else ""
+
+    def _resolve_stt_display_name(self) -> str:
+        """Resolve 'Model（Provider）' once, so the status page never shows a raw uuid.
+
+        Uses the injected getter (same path as recognition) and caches the
+        first success; failures fall back to the configured value elsewhere.
+        """
+        cached = getattr(self, "_stt_display_cache", "")
+        if cached:
+            return cached
+        getter = self._stt_provider or _STT_GETTER
+        if not getter:
+            return ""
+        try:
+            client = getter(str(self.config.get("stt_model", "") or "").strip())
+        except Exception:
+            return ""
+        info = getattr(client, "model", None) if client is not None else None
+        if info is None:
+            return ""
+        name = getattr(info, "model_name", "") or ""
+        provider = getattr(info, "provider_name", "") or ""
+        text = f"{name}（{provider}）" if name and provider else (name or provider)
+        if text:
+            self._stt_display_cache = text
+        return text
 
     async def _transcribe(self, wav_path: str) -> str:
-        if self.config.get("asr_backend", "local") == "cloud":
-            return await self._transcribe_cloud(wav_path)
-        if self._whisper is None:
-            self._whisper = self._make_whisper()
-        timeout = self._asr_load_timeout() if self._whisper._model is None else 120
-        return await asyncio.wait_for(self._whisper.transcribe(wav_path), timeout=timeout)
-
-    async def _transcribe_cloud(self, wav_path: str) -> str:
-        # 实例级 getter 优先；为空（配置热更新重建后的新实例）回退模块级兜底
+        # Instance-level getter first; fall back to the module-level one
+        # (config hot-reload rebuilds instances and drops the instance getter).
         getter = self._stt_provider or _STT_GETTER
         if not getter:
             raise RuntimeError(
-                "cloud STT unavailable — restart the bot after enabling the plugin, "
-                "or switch asr_backend to local"
+                "STT unavailable — restart the bot after enabling the plugin"
             )
-        # Prefer the per-adapter override; empty falls back to KiraAI default STT.
-        preferred = str(self.config.get("cloud_stt_model", "") or "").strip()
+        # Per-adapter override first; empty falls back to KiraAI's default STT.
+        preferred = str(self.config.get("stt_model", "") or "").strip()
         try:
             stt = getter(preferred)
         except TypeError:
-            # Older getter with no-arg signature.
-            stt = getter()
+            stt = getter()  # older getter with no-arg signature
         if stt is None:
             raise RuntimeError(
-                "no STT model available — configure a default STT in KiraAI "
-                "(Configuration -> Models), or pick a cloud STT model in the adapter, "
-                "or switch asr_backend to local"
+                "no STT model — configure one in KiraAI (Configuration → Models) "
+                "or pick one in this adapter"
             )
-        return await stt.speech_to_text(Record(record=wav_path))
+        self._last_stt_client = stt
+        timeout = self._stt_timeout_seconds()
+        return await asyncio.wait_for(
+            stt.speech_to_text(Record(record=wav_path)), timeout=timeout,
+        )
 
     # ── history / status ──
 
@@ -1710,12 +1524,14 @@ class VRChatAdapter(BaseAdapter):
         record_elapsed = 0.0
         if self._state == "recording" and self._record_started_at:
             record_elapsed = round(time.time() - self._record_started_at, 1)
-        model_status = ""
-        model_error = ""
-        if self._whisper is not None:
-            model_status = getattr(self._whisper, "status", "")
-            model_error = getattr(self._whisper, "last_error", "") or ""
-        backend = self.config.get("asr_backend", "local")
+        configured_model = str(self.config.get("stt_model", "") or "").strip()
+        resolved = self._stt_display_name() or self._resolve_stt_display_name()
+        if resolved:
+            stt_display = resolved
+        elif configured_model:
+            stt_display = "已指定（尚未识别过）"
+        else:
+            stt_display = "未配置（将用全局默认）"
         return {
             "adapter_name": str(self.info.name),
             "platform": str(self.info.platform),
@@ -1727,13 +1543,9 @@ class VRChatAdapter(BaseAdapter):
             "foreground_process": _foreground_process_name(),
             "vrchat_running": self.vrchat_running,
             "oscq_reachable": self.oscq_reachable,
-            "backend": backend,
-            "cloud_stt_model": self.config.get("cloud_stt_model", "") if backend == "cloud" else "",
-            "whisper_device": getattr(self._whisper, "_device_used", "") if self._whisper else "",
-            "whisper_model": self.config.get("whisper_model", "large-v3-turbo") if backend == "local" else "",
-            "whisper_status": model_status,
-            "whisper_error": model_error,
-            "hf_endpoint": self.config.get("hf_endpoint", _HF_MIRROR),
+            "stt_model": configured_model,
+            "stt_display": stt_display,
+            "stt_timeout_seconds": self._stt_timeout_seconds(),
             "pending_segments": self._sender.pending if self._sender else 0,
             "sent_count": self._sender.sent_count if self._sender else 0,
             "record_elapsed": record_elapsed,

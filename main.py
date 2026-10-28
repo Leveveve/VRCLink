@@ -3,7 +3,7 @@ VRCLink — push-to-talk voice interface to the bot inside VRChat.
 
 Registers the "VRChat" adapter (adapter/adapter.py):
     PTT hotkey (keyboard, or VR controller via OVR Advanced Settings Key Press)
-    -> record mic -> ASR (faster-whisper local / KiraAI STT cloud)
+    -> record mic -> ASR (KiraAI STT provider; cloud only since 1.0.0)
     -> message pipeline (persona, memory, tools all apply)
     -> reply Text -> OSC chatbox segments in VRChat.
 
@@ -62,6 +62,13 @@ def _load_adapter_component():
 
 class VRCLinkPlugin(BasePlugin):
     async def initialize(self):
+        # 1.0.0 is cloud-STT only. Migrate old adapter configs (carry
+        # cloud_stt_model -> stt_model, drop local-ASR keys) BEFORE the
+        # adapter instance is registered, so the new instance starts clean.
+        try:
+            self._migrate_legacy_asr_config()
+        except Exception as e:
+            logger.warning(f"VRCLink: legacy ASR config migration failed (ignored): {e}")
         # 框架只在 register_adapter 时静态读一次 schema.json（无动态选项
         # 机制），所以必须抢在注册前把本机麦克风列表写进 mic_device.options，
         # WebUI 才能把该字段渲染成下拉。失败绝不能阻断插件初始化。
@@ -130,6 +137,38 @@ class VRCLinkPlugin(BasePlugin):
             f"VRCLink: mic_device options ready ({len(options)} 项，含系统默认哨兵)；"
             "已写入 schema，重启 bot 后适配器配置页下拉更新"
         )
+
+    def _migrate_legacy_asr_config(self):
+        """Persist the 1.0.0 config migration for every VRChat instance.
+
+        Runs before `register_adapter`, so the freshly built adapter instance
+        already reads the migrated keys. Idempotent: no write when nothing
+        changed (the helper returns None in that case).
+        """
+        ctx_cfg = getattr(self.ctx, "config", None)
+        if ctx_cfg is None:
+            return
+        adapters = ctx_cfg.get_config("adapters", {}) or {}
+        mod = _load_adapter_component()
+        migrate = getattr(mod, "migrate_legacy_asr_config", None) if mod else None
+        if migrate is None:
+            return
+        migrated = 0
+        for entry in adapters.values():
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("platform", "")) != "VRChat":
+                continue
+            config = entry.get("config")
+            if isinstance(config, dict) and migrate(config) is not None:
+                migrated += 1
+        if migrated:
+            ctx_cfg.save_config()
+            logger.warning(
+                f"VRCLink 1.0.0: local ASR has been removed; migrated {migrated} "
+                "VRChat instance(s) to cloud STT (stt_model). "
+                "Make sure an STT model is configured in KiraAI."
+            )
 
     def _collect_configured_mic_devices(self) -> list[str]:
         """已保存的适配器实例 mic_device 值，保证它们留在 options 里。

@@ -138,25 +138,12 @@
         els.vrchat.textContent = data.vrchat_running ? "在线" : "离线";
         els.oscq.textContent = "OSCQuery " + (data.oscq_reachable ? "可达" : "未响应");
 
-        var backend = data.backend || "local";
-        els.backend.textContent = backend === "cloud" ? "云端 STT" : "本地 whisper";
-        var modelLine = "";
-        if (backend === "local") {
-            var wstat = data.whisper_status || "";
-            var wdev = data.whisper_device || "";
-            modelLine = (data.whisper_model || "");
-            if (wdev) modelLine += " @ " + wdev;
-            if (wstat === "loading") modelLine += " · 下载/加载中";
-            else if (wstat === "failed") modelLine += " · 加载失败";
-            else if (wstat === "loaded") modelLine += " · 就绪";
-            else if (wstat) modelLine += " · " + wstat;
-        } else {
-            modelLine = "KiraAI 默认 STT";
-        }
+        // 1.0.0 is cloud-STT only: no local model, no backend switch.
+        els.backend.textContent = "云端 STT";
+        var modelLine = data.stt_display ||
+            (data.stt_model ? data.stt_model : "未配置（将用全局默认）");
+        if (data.stt_timeout_seconds) modelLine += " · 超时 " + data.stt_timeout_seconds + "s";
         els.model.textContent = modelLine;
-        if (data.whisper_error && data.whisper_status === "failed") {
-            els.error.textContent = data.last_error || data.whisper_error;
-        }
 
         els.sent.textContent = data.sent_count != null ? String(data.sent_count) : "—";
         els.pending.textContent = "队列 " + (data.pending_segments || 0) +
@@ -291,6 +278,8 @@
             PPC.api.post("test-record?seconds=" + seconds).then(function (data) {
                 if (data && data.ok) {
                     var msg = "时长 " + data.duration + "s，识别：" + (data.text || "（空）");
+                    if (data.elapsed_ms != null) msg += " · 耗时 " + data.elapsed_ms + " ms";
+                    if (data.stt_display) msg += "\n模型：" + data.stt_display;
                     if (data.peak_dbfs != null) {
                         msg += "\n电平：peak " + fmtDb(data.peak_dbfs) + " / rms " + fmtDb(data.rms_dbfs) +
                             " dBFS（设备：" + (data.device || "？") + "）";

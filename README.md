@@ -1,319 +1,104 @@
 # VRCLink
 
-在 **VRChat** 游戏内与你的 **KiraAI** 数字生命对话：按住按键说话 → 语音识别 → bot 回复发送到游戏聊天框（chatbox，全房间可见）。
+在 **VRChat** 里和你的 **KiraAI** 数字生命说话。按住热键讲话，语音识别后走 KiraAI 完整链路（人设、记忆、工具都生效），回复自动分段发到 VRChat 聊天框（chatbox，全房间可见）。
 
 ```
-按住热键说话 ──► 录音 ──► ASR（本地 / 云端）──► KiraAI 完整管线
-                                                      │
-                                                      ▼
-VRChat 聊天框 ◄── OSC /chatbox/input ◄── 分段 + 节流 ◄── bot 回复
+按住热键说话 → 录音 → 云端语音识别 → KiraAI 管线 → 分段 + 节流 → VRChat 聊天框
 ```
 
-- 版本：**1.2.0**（1.2.0 新增麦克风增益 `mic_gain`、状态页电平表与设备电平探测 `/probe-device`、`mic_device` 自动检测下拉列表与 `/refresh-devices`；1.1.1 修复 CUDA DLL 预加载、本地 GPU 推理真正生效；自 1.1.0 起适配 **KiraAI v3.0.0+**；v2.x 旧核心请用 VRCLink ≤1.0.x）
-- 平台：Windows（依赖 pynput 全局热键 / sounddevice / 前台窗口检测）
-- 游戏：VRChat（官方 OSC 接口，UDP 本机回环，EAC 安全）
-- Bot：KiraAI（插件 + 适配器实例）
-
----
-
-## 功能
-
-| 能力 | 说明 |
-|------|------|
-| 按键说话（PTT） | 默认 `B` 键；支持单键、组合键（`ctrl+shift+v`）、鼠标侧键（`x2`/`x3`） |
-| hold / toggle | 按住说话，或点按开始 / 再点结束 |
-| 仅游戏前台触发 | 可选；避免在其他软件打字时误触发 |
-| 麦克风增益 | `mic_gain` 软件增益 0.5~20 倍，拯救电平偏低的麦克风 |
-| 麦克风下拉选择 | `mic_device` 由插件启动时自动检测（本机可开 16 kHz 的输入设备），在 WebUI 下拉选择，首项 = 跟随系统默认 |
-| 电平可视化与设备探测 | 状态页列出所有输入设备（含 16 kHz 可用性），逐个「测电平」（peak / RMS dBFS），识别空结果时直接提示原因 |
-| 本地 ASR | faster-whisper（GPU 优先，失败自动回退 CPU） |
-| 云端 ASR | 走 KiraAI 已配置的 STT；可另指定模型 |
-| 完整 bot 管线 | 人设 / 记忆 / 工具全部生效（不是简单回声） |
-| 聊天框智能分段 | 按句读切分，单条 ≤140 字；间隔按字数自适应 |
-| 回复前缀 | 如 `yuki：`，区分 bot 发言与玩家自己打字 |
-| typing 指示器 | 处理中显示「···」，并自动保活（VRChat 会超时隐藏） |
-| 状态页 / 小组件 | WebUI 内查看状态、测试发送、试录识别、强制复位 |
-| VR 手柄 PTT | 经 OVR Advanced Settings 的 Key Press 映射到同一键盘热键（插件无需改） |
-
-
----
-
-## 系统要求
-
-| 项 | 要求 |
-|----|------|
-| 操作系统 | Windows 10/11（全局热键、前台检测、音频均为 Windows 路径） |
-| KiraAI | 核心 **v3.0.0+**（VRCLink 1.1.0 改用 v3 的 BaseAdapter / IMCapability 适配器接口） |
-| Python | 3.10+（KiraAI 运行环境） |
-| VRChat | 已安装，游戏内开启 OSC（菜单 → OSC → Enabled） |
-| 麦克风 | 系统默认，或在配置下拉中选择本机检测到的输入设备 |
-| 可选 GPU | NVIDIA（本地 whisper 加速）；无 GPU 自动用 CPU |
-| 可选 VR | SteamVR 串流 + [OVR Advanced Settings](https://github.com/OpenVR-Advanced-Settings/OpenVR-AdvancedSettings)（手柄 PTT） |
+- 适配器平台：`VRChat`，版本 **1.0.0**，需要 **KiraAI v3.0.0+**
+- 语音识别**只走云端**（KiraAI 里配置的 STT 模型），插件本身不带本地模型：安装体积小、不占 GPU、不吃 CPU
+- 支持键盘热键，也支持 VR 手柄（用 OVR Advanced Settings 的 Key Press 映射到同一按键）
 
 ---
 
 ## 安装
 
-### 1. 复制插件
+1. 把 `vrclink` 整个目录放到 `<bot>/data/plugins/` 下（从商店安装则自动完成）。
+2. 依赖：KiraAI 会自动执行 `requirements.txt`；手动装也可以：
 
-把本目录（`vrclink/`）整份复制到 **某一个** bot 的插件目录：
-
-```text
-<bots>/data/plugins/vrclink/
-```
-
-标准 KiraAI 插件结构（与官方开发指南一致）：
-
-```text
-vrclink/
-├── manifest.json       # 插件元信息（plugin_id / version / 描述）
-├── main.py             # 入口：注册适配器、状态页、LLM 环境注入
-├── requirements.txt    # 运行依赖
-├── README.md           # 本说明
-├── icon.svg
-├── adapter/            # 适配器组件（目录名固定 adapter/）
-│   ├── manifest.json   # {"name": "VRChat"} → 平台 ID
-│   ├── adapter.py      # IMAdapter 实现
-│   └── schema.json     # 适配器实例配置字段
-└── web/                # WebUI 状态页（可选）
-    ├── index.html
-    ├── style.css
-    └── app.js
-```
-
-> 一次只服务一位 bot。要给多个 bot 用，请分别复制到各自的 `data/plugins/`。
-
-### 2. 安装依赖
-
-在该 bot 的 Python 环境里安装（faster-whisper 较大，建议手动装）：
-
-```powershell
-# Windows 示例，请按实际 bot 的 python 路径调整
-E:\KiraAI\<bot>\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-本地 GPU 推理（可选，约 2–3G 显存）：
-
-```powershell
-E:\KiraAI\<bot>\.venv\Scripts\python.exe -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-```
-
-云端识别则可不装 faster-whisper 与 CUDA 库（请把 `asr_backend` 设为 `cloud`）。
-
-### 3. 启动 bot
-
-启动 / 重启 bot，打开 WebUI → 插件页，确认 **VRCLink** 已启用。
-
-### 4. 创建适配器实例（一次性）
-
-WebUI → **适配器** → **新建**：
-
-| 字段 | 值 |
-|------|-----|
-| 平台 | **VRChat** |
-| 实例名 | `vrchat`（**不能包含冒号**） |
-| 启用 | 开 |
-
-此后所有配置都在这个适配器实例的配置页里改。
-
-### 5. VRChat 侧
-
-游戏内打开 **OSC**（菜单 → OSC → Enabled）。默认即可：入站 `127.0.0.1:9000`。
-
----
-
-## 配置说明
-
-配置位置：WebUI → 适配器 → 你的 VRChat 实例。
-
-### 基础
-
-| 配置项 | 默认 | 说明 |
-|--------|------|------|
-| `owner_id` | `owner` | 私聊会话 ID（会话 = `实例名:dm:此值`），一般不用改 |
-| `owner_nickname` | `主人` | bot 眼中说话者的昵称（进入人设上下文） |
-| `ptt_mode` | `hold` | `hold` 按住说话 / `toggle` 点按切换 |
-| `hotkey` | `b` | 热键：`b`、`ctrl+shift+v`、鼠标侧键 `x2`/`x3` |
-| `hotkey_require_focus` | `true` | 仅指定进程在前台时才触发 |
-| `hotkey_focus_process` | `VRChat.exe` | 视为「游戏内」的进程名 |
-| `mic_device` | `【系统默认】跟随 Windows 设置` | 麦克风下拉列表：插件启动时自动检测本机可开 16 kHz 的输入设备（形如 `MME · 麦克风 (…)`），首项与空串都 = 系统默认。列表在状态页「刷新麦克风列表」后**需重启 bot（或禁用/启用插件）**才会更新；录音时找不到已配置的设备会回退系统默认并在状态页提示。**务必用状态页「测电平」确认选对了设备** |
-| `mic_gain` | `1.0` | 麦克风软件增益（0.5~20）：1.0=原样，2~5 适合电平偏低的麦克风，过高会削波（状态页有触顶提示） |
-| `max_record_seconds` | `60` | 单次录音上限，超时自动结束 |
-
-### 语音识别
-
-| 配置项 | 默认 | 说明 |
-|--------|------|------|
-| `asr_backend` | `local` | `local` 本机 faster-whisper / `cloud` 云端 STT |
-| `cloud_stt_model` | 空 | **仅 cloud**：留空用 KiraAI 全局默认 STT；也可单独指定其他 STT 模型 |
-| `whisper_model` | `large-v3-turbo` | **仅 local**：模型名或本地目录 |
-| `whisper_language` | `zh` | `zh` / `auto` / `en` … |
-| `whisper_compute` | `int8_float16` | GPU 精度；CUDA 缺失自动回退 CPU `int8` |
-| `hf_endpoint` | `https://hf-mirror.com` | 下载 whisper 用的 Hub；可直连官方源则清空 |
-| `whisper_download_root` | 空 | 模型缓存目录；空 = HuggingFace 默认 |
-| `asr_load_timeout_seconds` | `600` | 首次下载/加载超时 |
-
-**云端识别优先级**：
-
-1. 若在适配器里选了 `cloud_stt_model` → 用该模型  
-2. 否则 → 用 KiraAI **全局默认 STT**（配置 → 模型）  
-3. 都没有 → 报错并提示改回 local 或去配置 STT  
-
-### 聊天框发送
-
-| 配置项 | 默认 | 说明 |
-|--------|------|------|
-| `osc_in_port` | `9000` | VRChat OSC 入站端口 |
-| `reply_prefix` | 空 | 每条消息前缀，**强烈建议**设为 bot 昵称（如 `yuki：`） |
-| `send_interval` | `2` | 短句最小间隔（秒） |
-| `read_chars_per_second` | `5` | 阅读速度；长句间隔 ≈ 字数 ÷ 此值 |
-| `max_segment_interval` | `8` | 长句间隔上限（秒） |
-| `send_timeout_seconds` | `120` | 管线超时未回复则自动回 idle |
-| `typing_indicator` | `true` | 处理中显示「···」并自动保活 |
-| `log_conversations` | `true` | 识别与回复写入 `plugin_data/vrclink/conversations.jsonl` |
-
-> VRChat 聊天框限制：单条 ≤144 字（我们用 140），且 5 秒内最多 5 条，超出静默丢弃。插件已自我节流。
-
----
-
-## VR 手柄按键说话（可选）
-
-VR 手柄本身不进 Windows 键盘层。用 [OVR Advanced Settings](https://store.steampowered.com/app/1009850/OVR_Advanced_Settings/)（免费）把任意手柄键映射成键盘按键，即可与键盘走同一条热键路径。
-
-1. 安装并启动 OVRAS（可随 SteamVR 自启）。
-2. **先退出 OVRAS**，编辑  
-   `%AppData%\AdvancedSettings-Team\OVR Advanced Settings.ini`  
-   在 `[keyboardShortcuts]` 写入（与插件 `hotkey` 一致）：
-
-   ```ini
-   keyPressSystem=b
+   ```
+   <bot-python> -m pip install -r requirements.txt
    ```
 
-3. 启动 SteamVR / OVRAS。
-4. SteamVR → 设置 → 控制器选项 → 管理控制器绑定 → 应用选 **OVR Advanced Settings** → 自定义 → 编辑绑定 → 给手柄某键绑定 **System → Key Press System**。
-5. 戴上头显，VRChat 前台，按住手柄该键说话。
+3. 重启 bot（或禁用再启用插件）。日志出现 `VRCLink plugin initialized` 即成功。
 
-要点：
+**依赖**：`python-osc`、`sounddevice`、`pynput`、`psutil`、`httpx`、`numpy`。没有 faster-whisper、没有 CUDA 库。
 
-- 使用 **Key Press**（按住=键按住），**不要**用 Keyboard Shortcut 宏（宏是点按，hold 模式会失效）。
-- 改 INI 必须在 OVRAS **未运行**时改（只在启动时读文件）。
-- `Key Press System` 始终可用；`Key Press Misc` 可能受其他绑定影响。
+## 首次配置
 
----
+**先配 STT**：WebUI → 配置 → 模型，确认至少有一个类型为 `stt` 的模型（也可以用 KiraAI 的全局默认 STT）。
 
-## 使用
+**再建适配器实例**：WebUI → 适配器 → 新建，平台选 `VRChat`，实例名建议 `vrchat`。然后逐项设置：
 
-1. 启动 VRChat，确保 OSC 已开、焦点在游戏。
-2. 按住热键（默认 `B`）说话，松开结束。
-3. 聊天框出现「···」→ 识别 → bot 回复（带 `reply_prefix`）。
-4. 也可在 WebUI → 插件 → **VRCLink 状态** 里点「测试发送 / 试录识别」。
+| 配置项 | 说明 |
+|---|---|
+| 语音识别模型 `stt_model` | 留空 = 用 KiraAI 全局默认 STT（推荐）。想只让 VRChat 走某个模型就在这里指定。 |
+| 麦克风设备 `mic_device` | 下拉列表由插件启动时扫描本机可用设备生成（只列能以 16 kHz 打开的），首项=跟随 Windows 默认。**选错设备是最常见的「识别不出来」原因**。 |
+| 麦克风增益 `mic_gain` | 1.0=原样。笔记本内置麦小声可以试 2~4；过高会削波（状态页会显示 clipping）。 |
+| 热键 `hotkey` 与 `按键模式 ptt_mode` | 默认 `b` + `hold`（按住说话）。`toggle` 是按一下开始、再按一下结束。 |
+| 仅 VRChat 前台时触发 `hotkey_require_focus` | 开启后只有前台窗口是 `VRChat.exe` 时热键才生效，避免在别的软件里打字误触发。 |
+| 识别超时 `stt_timeout_seconds` | 单次识别最长等待，默认 20 秒；超时即放弃本次、不发送任何内容。 |
+| 静音跳过 `silence_skip_dbfs` | 录音峰值低于该值就不调用 STT，默认 −55 dBFS，`0` = 关闭。省额度、也避免把静音识别成幻觉文本。 |
+| 回复前缀 `reply_prefix` | 例如 `yuki：`。聊天框消息显示在本机玩家名下，前缀用来区分 bot 和你的发言，**强烈建议填**。 |
+| 分段与节流 | `send_interval` 两段之间最小间隔、`read_chars_per_second` 按语速切段、`max_segment_interval` 间隔上限。VRChat 限制 5 秒内最多 5 条消息。 |
+| OSC 端口 `osc_in_port` | 默认 9000，和 VRChat 的 OSC 设置保持一致。 |
+| 权限相关 | 本适配器只有一个输入源（本机按键说话），`permission_mode` 保持 `deny_list`、名单留空即可。 |
 
-### 测试建议
+## 在 VRChat 里使用
 
-- **测试发送**：验证 OSC 通路（不经过 LLM）。
-- **设备电平探测**：验证麦克风选得对不对（只测电平，不识别，最直观）。
-- **试录识别**：验证麦克风 + ASR（不经过 LLM）。
-- **完整对讲**：热键说一句「你好」，应有人设化回复进聊天框。
+1. VRChat 里开启 OSC（Action Menu → Options → OSC → Enabled）。
+2. 确认游戏窗口在前台（若开了「仅 VRChat 前台时触发」）。
+3. **按住热键说话 2–3 秒再松手**（`hold` 模式）。太短（< 0.5 秒）会被直接丢弃。
+4. 松手后先识别、再等 bot 回复，回复会按语速分段发到聊天框。
 
----
+VR 手柄：在 OVR Advanced Settings 里用 *Key Press* 把某个手柄按键映射成热键的同一个键（如 `b`）。
 
-## 数据与配置路径
+## 状态页
 
-| 用途 | 路径 |
-|------|------|
-| 插件本体 | `data/plugins/vrclink/` |
-| 适配器配置 | `data/config/system_config.json` → adapters（或 WebUI 编辑） |
-| 临时录音 | `data/plugin_data/vrclink/tmp/` |
-| 对话日志 | `data/plugin_data/vrclink/conversations.jsonl` |
+WebUI 里的「VRCLink 状态」页面可以做这些事：
 
-多 bot 部署时，各 bot 的 `data/` 相互独立，请分别安装与配置。
+- **在线状态**：适配器是否活着、VRChat 是否在运行、OSCQuery 是否可达
+- **当前 STT**：实际解析到的模型（未配置时会提示「未配置（将用全局默认）」）
+- **试录识别**：录一段并真的调用一次云端识别，回显文本、耗时 ms、电平、命中的模型——排查问题先看这个
+- **麦克风电平**：逐设备「测电平」，直接给你 peak/rms dBFS；说话时能到 −30 ~ −10 dBFS 才好用
+- **刷新麦克风列表**：把当前设备写进 schema 的 `mic_device.options`（写好之后要重启 bot 才会在配置页出现新下拉）
+- **强制复位**：卡在某个状态时回到 idle
 
----
+## 排查
 
-## 兼容性与已知限制
+**识别为空 / 一直没反应**
 
-| 风险 / 限制 | 影响 | 建议 |
-|-------------|------|------|
-| **仅 Windows** | macOS / Linux 上 pynput、前台检测、音频路径未适配 | 暂不支持 |
-| **全局热键冲突** | 与游戏/其他软件的 `B` 键冲突 | 改 `hotkey`，或开「仅 VRChat 前台」 |
-| **游戏内聊天框打字误触** | 在 VRChat 聊天框输入 `B` 可能触发录音 | 知悉即可；或改冷门热键 |
-| **VRChat 聊天框限流** | 5 条 / 5 秒，超出静默丢弃 | 保持 `send_interval ≥ 1`；过长回复自动拆段 |
-| **9000 端口占用** | 其他 OSC 工具抢入站口则收不到 | 关闭冲突工具或改 `osc_in_port` 与 VRChat 对齐 |
-| **9001 出站占用** | 仅影响备用手势方案（默认不用） | v1 主路径是键盘热键，可忽略 |
-| **本地 whisper 显存不足** | VR 中 GPU 被占满可能 OOM/掉帧 | 换 `medium`/`small`、改 CPU、或 `asr_backend=cloud` |
-| **CUDA 依赖安装失败** | 缺失时自动回退 CPU，识别变慢 | 装 `nvidia-cublas-cu12 nvidia-cudnn-cu12`，或改云端 |
-| **首次下载 whisper 模型** | 可能较久或失败（网络） | 用 `hf_endpoint` 镜像；或改云端 |
-| **ASR 幻觉 / 空识别** | 静音或过短时胡乱文字 | 已有过滤；仍可在提示词里约束 |
-| **回复挂本机玩家名下** | 不加前缀时像玩家自己在说话 | **务必设置 `reply_prefix`** |
-| **默认消息策略 discard** | 若你自写 `@on.im_message` 且不 buffer/trigger，会拦下消息 | 只做预处理即可，勿默认 discard |
-| **mic_device 下拉需重启更新** | 框架只在适配器注册时读一次 schema，刷新/换设备后配置页下拉不会立即变 | 状态页「刷新麦克风列表」后重启 bot（或禁用/启用插件）；本页设备列表与「测电平」不受影响，即时可用 |
-| **适配器实例名含冒号** | 会话路由失败 | 实例名用 `vrchat` 这类简单名 |
-| **单 bot 单实例** | 多 bot 同时开会抢热键 / 麦克风 / OSC 端口 | 一次只开一个 VRCLink |
-| **OVRAS 与 SteamVR** | 手柄 PTT 依赖 OVRAS 随 SteamVR 运行 | 设自启；Key Press 动作需绑定 |
-| **KiraAI 版本变动** | 核心 API（Adapter / Prompt）可能调整 | `core_version: >=3.0.0`；异常时看日志 |
+1. 状态页「试录识别」看回显的电平。−50 dBFS 以下基本等于静音 → 换麦克风设备（选真实的，不是 Pico 串流麦、虚拟声卡之类）。
+2. 确认 `mic_device` 不是「系统默认」，或者系统默认设备确实是你想用的麦。
+3. 说话时别只点一下热键：`hold` 模式要按住。
+4. 看日志有没有 `STT 超时`、`STT 失败：…`、`未配置 STT 模型`。
 
----
+**聊天框没东西**
 
-## 故障排查
+- VRChat 里 OSC 没开 → Action Menu 里打开。
+- 回复被 VRChat 丢掉：单行超过 **144 字符**会被静默丢弃（插件会自动分段，`read_chars_per_second` 越小段越短）。
+- 节流太慢：`send_interval` 调小（不低于 1）。
 
-### 识别不出声音怎么办（试录识别永远返回空）
+**状态页显示 `{"detail":"Invalid token"}`**
 
-按顺序排查，绝大多数是第 1、2 步就解决了：
+这是 KiraAI WebUI 的会话问题，不是插件 bug：插件页（iframe）用 cookie `kira_token` 鉴权，而 cookie 只按主机名存、不分端口，多个 bot 在同一台机器上会互相覆盖。解决：在**打开插件页的同一个主机名**上重新登录一次（例如都用 `127.0.0.1:5268`），或者给不同 bot 用不同主机名（`127.0.0.1` / `localhost` / `*.localhost`）。
 
-1. **先看电平，别猜**。打开 WebUI → 插件 → **VRCLink 状态** →「麦克风电平」区块：
-   顶部会显示当前实际用到的设备与最近一次录音的 peak / RMS（dBFS）；点各设备的「测电平」，
-   对着麦克风正常说话。**说话时 peak 能到 -30 ~ -10 dBFS 的设备才是好的**；一直停在
-   -60 dBFS 以下 ≈ 数字静音，等于什么都没录到。
-2. **选对设备**（最常见的坑）：系统默认输入设备可能不是你以为的那只麦（例如 VR 串流麦
-   Pico Streaming Microphone 只有在 VR 串流时才有声音；蓝牙耳机麦、虚拟声卡也常抢默认位）。
-   在「麦克风电平」里找到测起来正常的设备，到适配器配置 `mic_device` **下拉选择**它
-   （下拉由插件启动时自动检测，只列本机能开 16 kHz 的输入设备；状态页点「刷新麦克风列表」
-   可重扫，但下拉要重启 bot（或禁用/启用插件）后才会更新）。仍可手动填设备名子串（如
-   `DirectSound` 或设备名里独特的一段），插件按「完整名 → 子串 → 去前缀子串」的顺序解析。
-3. **调增益**：设备对了但电平偏低（说话只有 -40 dBFS 左右），把 `mic_gain` 调到 2~5 再试；
-   若状态页提示「触顶削波（clipping）」说明调过头了，往回调。
-4. **系统层音量**：以上都正常仍无声，检查 Windows 设置 → 系统 → 声音 → 输入：该设备的
-   「输入音量」是否为 0 / 被禁用；再检查麦的物理开关（很多耳机麦有静音键）。
-5. 设备列表里「16 kHz」标「不可用」的设备本插件用不了（WASAPI 共享模式设备常见），
-   换同名设备的其他 Host API（MME / DirectSound）条目通常可用。
+**多段回复把上一段挤掉**
 
-> 经验阈值：安静环境 peak < -50 dBFS 属正常底噪；录音结果 peak < -50 dBFS 且识别为空时，
-> 插件会直接在返回里提示「输入电平极低」并指向上述步骤。
+VRChat 聊天框同时只显示最近一条（`/chatbox/input` 会替换前一条）。这是游戏本身的限制，插件只能控制节奏。
 
-| 现象 | 排查 |
-|------|------|
-| 按热键没反应 | 焦点是否 VRChat（若开了 require_focus）；实例是否已启动；日志 `hotkey armed` |
-| 有录音无文字 | 先看上文「识别不出声音怎么办」：状态页测电平 → 选对设备 → 调 `mic_gain`；再查本地模型是否加载成功，或切云端 |
-| 有文字无回复 | 适配器实例是否创建、`is_mentioned` 管线是否正常；看 bot 日志 |
-| 有回复游戏里看不见 | OSC 是否开启；`osc_in_port` 是否 9000；VRChat 是否在跑；测试发送 |
-| 回复像自己打的 | 设置 `reply_prefix` |
-| 「···」闪断 | 已保活；若仍闪，查 VRChat 版本与 typing 开关 |
-| 长句读不完就跳 | 调大 `read_chars_per_second` 倒数，或调大 `max_segment_interval` |
-| 手柄无效 | OVRAS INI 是否 `keyPressSystem=b` 且改完重启过 OVRAS；SteamVR 是否绑了 Key Press System |
-| 日志报 `cublas64_12.dll is not found` / `CUDA load failed` | ≤1.1.0 的已知问题（1.1.1 起自动预加载 CUDA DLL）；CUDA 缺失时自动回退 CPU，若仍想上 GPU 确认已装 `nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12` |
+## 已知限制
 
-日志关键字：`VRChat`、`chatbox <-`、`recognized:`、`whisper`、`VRCLink`。
+- 语音识别**只有云端**：需要外网 + 已配置的 STT 模型；网络抖动会表现为识别变慢或超时（超时会明确提示，不会发送奇怪内容）。
+- 聊天框单行 144 字符上限、5 秒最多 5 条，长回复会被切成多段。
+- 只支持 Windows（psutil 前台进程检测、pynput 全局热键、sounddevice 设备枚举）。
+- 一次只有一段录音（没有并发）。
 
----
+## 更新日志
 
-## 卸载
-
-1. WebUI 停用 / 删除插件，或删掉适配器实例。  
-2. 删除 `data/plugins/vrclink/`。  
-3. 可选：删除 `data/plugin_data/vrclink/`。  
-4. 若用过 OVRAS，可自行卸载或保留。  
-
----
-
-## 致谢 / 参考
-
-- [VRChat OSC 文档](https://docs.vrchat.com/docs/osc-overview)
-- [OVR Advanced Settings](https://github.com/OpenVR-Advanced-Settings/OpenVR-AdvancedSettings)（键盘映射指南见其 `docs/keyboard_input_guide.md`）
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-- 同类项目思路参考：TTS-Voice-Wizard、whisper_osc、VRCT
-
----
+见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可
 
-按仓库发布时附带的许可证为准（建议 MIT）。
+MIT

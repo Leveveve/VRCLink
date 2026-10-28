@@ -4,9 +4,9 @@
         "type": "string",
         "options": ["allow_list", "deny_list"],
         "default": "deny_list",
-        "hint": "Keep deny_list (empty deny list = accept all). The only inbound sender is this PC's PTT anyway.",
+        "hint": "Keep deny_list (empty deny list = accept all).",
         "locales": {
-            "zh": { "name": "权限模式", "hint": "保持 deny_list（空黑名单 = 全部接受），本适配器唯一消息来源就是本机按键说话" }
+            "zh": { "name": "权限模式", "hint": "保持 deny_list 即可" }
         }
     },
     "user_allow_list": {
@@ -21,86 +21,71 @@
         "type": "list",
         "default": [],
         "hint": "Unused (DM-only adapter).",
-        "locales": { "zh": { "name": "群聊白名单", "hint": "本适配器无群聊，不生效" } }
+        "locales": { "zh": { "name": "群聊白名单", "hint": "本适配器无群聊" } }
     },
     "group_deny_list": {
         "name": "Group deny list",
         "type": "list",
         "default": [],
         "hint": "Unused (DM-only adapter).",
-        "locales": { "zh": { "name": "群聊黑名单", "hint": "本适配器无群聊，不生效" } }
+        "locales": { "zh": { "name": "群聊黑名单", "hint": "本适配器无群聊" } }
     },
     "user_deny_list": {
         "name": "User deny list",
         "type": "list",
         "default": [],
         "hint": "Keep empty = accept all PTT input.",
-        "locales": { "zh": { "name": "私聊黑名单", "hint": "保持为空 = 接受所有按键说话输入" } }
+        "locales": { "zh": { "name": "私聊黑名单", "hint": "留空=接受所有输入" } }
     },
     "owner_id": {
         "name": "Owner session ID",
         "type": "string",
         "default": "owner",
-        "hint": "Session id of the DM session (sid = <adapter name>:dm:<owner_id>). Change only if you know why.",
-        "locales": { "zh": { "name": "主人会话ID", "hint": "私聊会话 ID（会话 = 适配器名:dm:此值），无特殊需要不要改" } }
+        "hint": "Session id used in the DM session key.",
+        "locales": { "zh": { "name": "主人会话ID", "hint": "无特殊需要不要改" } }
     },
     "owner_nickname": {
         "name": "Owner nickname",
         "type": "string",
         "default": "主人",
-        "hint": "Nickname shown to the bot for PTT voice input.",
-        "locales": { "zh": { "name": "主人昵称", "hint": "bot 眼中语音输入者的昵称" } }
+        "hint": "Name the bot sees for voice input.",
+        "locales": { "zh": { "name": "主人昵称", "hint": "bot 眼中的你" } }
     },
     "ptt_mode": {
         "name": "PTT mode",
         "type": "string",
         "options": ["hold", "toggle"],
         "default": "hold",
-        "hint": "hold = talk while key is held; toggle = press once to start, press again to stop.",
-        "locales": { "zh": { "name": "按键模式", "hint": "hold = 按住说话；toggle = 按一下开始、再按一下结束" } }
+        "hint": "hold = talk while held; toggle = press to start/stop.",
+        "locales": { "zh": { "name": "按键模式", "hint": "按住说话 / 按一下切换" } }
     },
     "hotkey": {
         "name": "Hotkey",
         "type": "string",
         "default": "b",
-        "hint": "Global hotkey: single key like 'b', combo like 'ctrl+shift+v', or mouse side buttons 'x2'/'x3'. OVR Advanced Settings Key Press can map a VR controller button to this same key.",
-        "locales": {
-            "zh": {
-                "name": "热键",
-                "hint": "全局热键：单键如 b，组合如 ctrl+shift+v，或鼠标侧键 x2/x3。VR 手柄可用 OVR Advanced Settings 的 Key Press 映射到同一按键"
-            }
-        }
+        "hint": "Single key, combo (ctrl+shift+v) or mouse x2/x3.",
+        "locales": { "zh": { "name": "热键", "hint": "按住说话的按键" } }
     },
     "hotkey_require_focus": {
         "name": "Only when VRChat focused",
         "type": "switch",
         "default": true,
-        "hint": "When on, the hotkey only starts recording if the focused window is VRChat. Typing B in other apps will not trigger PTT.",
-        "locales": {
-            "zh": {
-                "name": "仅 VRChat 前台时触发",
-                "hint": "开启后，只有焦点窗口是 VRChat 时热键才开始录音，其他软件里打字按 B 不会误触发"
-            }
-        }
+        "hint": "Ignore the hotkey unless VRChat is the focused window.",
+        "locales": { "zh": { "name": "仅 VRChat 前台时触发", "hint": "防止别的软件里误触" } }
     },
     "hotkey_focus_process": {
         "name": "Focus process name",
         "type": "string",
         "default": "VRChat.exe",
-        "hint": "Foreground process name that unlocks the hotkey (usually VRChat.exe).",
-        "locales": {
-            "zh": {
-                "name": "前台进程名",
-                "hint": "视为「游戏内」的前台进程名，一般是 VRChat.exe"
-            }
-        }
+        "hint": "Foreground process treated as 'in game'.",
+        "locales": { "zh": { "name": "前台进程名", "hint": "一般是 VRChat.exe" } }
     },
     "mic_device": {
         "name": "Microphone device",
         "type": "string",
         "default": "【系统默认】跟随 Windows 设置",
-        "hint": "Dropdown populated at plugin start with this PC's 16 kHz-capable input devices (first item = follow the Windows default device). After refreshing the list on the status page, restart the bot (or disable/enable the plugin) for the dropdown to update. If a configured device is not found when recording starts, the system default is used and a warning shows on the status page.",
-        "locales": { "zh": { "name": "麦克风设备", "hint": "下拉列表由插件启动时自动检测（本机可用 16 kHz 的输入设备），首项 = 跟随 Windows 系统默认。在状态页刷新列表后，需重启 bot（或禁用/启用插件）下拉才会更新；录音时找不到已配置的设备会自动回退系统默认并在状态页提示" } }
+        "hint": "16 kHz-capable inputs; first item = system default.",
+        "locales": { "zh": { "name": "麦克风设备", "hint": "选真实麦克风；首项=跟随系统" } }
     },
     "mic_gain": {
         "name": "Microphone gain",
@@ -108,13 +93,8 @@
         "default": 1.0,
         "minimum": 0.5,
         "maximum": 20.0,
-        "hint": "Software gain applied to the mic signal before ASR: 1.0 = untouched, 2-5 helps quiet microphones. Too high clips (see the level meter on the status page).",
-        "locales": {
-            "zh": {
-                "name": "麦克风增益",
-                "hint": "麦克风增益倍数；1.0=原样，2~5 适合电平偏低的麦克风，过高会削波（可在状态页电平表看到 clipping 提示）"
-            }
-        }
+        "hint": "1.0 = unchanged; 2-5 helps quiet mics, too high clips.",
+        "locales": { "zh": { "name": "麦克风增益", "hint": "麦小声时调 2~4" } }
     },
     "max_record_seconds": {
         "name": "Max recording seconds",
@@ -122,89 +102,34 @@
         "default": 60,
         "minimum": 5,
         "maximum": 300,
-        "hint": "Recording is force-stopped after this many seconds.",
-        "locales": { "zh": { "name": "最长录音秒数", "hint": "超时自动结束录音" } }
+        "hint": "Recording auto-stops after this long.",
+        "locales": { "zh": { "name": "最长录音秒数", "hint": "超时自动结束" } }
     },
-    "asr_backend": {
-        "name": "ASR backend",
-        "type": "string",
-        "options": ["local", "cloud"],
-        "default": "local",
-        "hint": "local = faster-whisper on this PC; cloud = speech-to-text via KiraAI providers (default STT, or the model selected below).",
-        "locales": { "zh": { "name": "语音识别后端", "hint": "local = 本机 faster-whisper；cloud = 走 KiraAI 的语音识别（默认 STT 模型，或下面指定的模型）" } }
-    },
-    "cloud_stt_model": {
-        "name": "Cloud STT model",
+    "stt_model": {
+        "name": "STT model",
         "type": "model_select",
         "model_type": "stt",
         "default": "",
-        "hint": "Only used when ASR backend = cloud. Leave empty to use KiraAI's default STT model (recommended). Pick another STT model here to override just for this adapter.",
-        "locales": {
-            "zh": {
-                "name": "云端语音识别模型",
-                "hint": "仅在识别后端 = cloud 时生效。留空 = 使用 KiraAI 全局默认 STT（推荐）；也可在此单独指定其他已配置的 STT 模型"
-            }
-        }
+        "hint": "Empty = KiraAI default STT. Pick another to override.",
+        "locales": { "zh": { "name": "语音识别模型", "hint": "留空=全局默认 STT" } }
     },
-    "whisper_model": {
-        "name": "Whisper model",
-        "type": "string",
-        "default": "large-v3-turbo",
-        "hint": "faster-whisper model name or local path. large-v3-turbo fits a 4060 8G; use 'medium'/'small' if VR frames drop.",
-        "locales": { "zh": { "name": "Whisper 模型", "hint": "模型名或本地路径。4060 8G 建议 large-v3-turbo；VR 里掉帧换 medium/small" } }
-    },
-    "whisper_language": {
-        "name": "Whisper language",
-        "type": "string",
-        "default": "zh",
-        "hint": "ISO code or 'auto'.",
-        "locales": { "zh": { "name": "识别语言", "hint": "语言代码或 auto" } }
-    },
-    "whisper_compute": {
-        "name": "Whisper compute type",
-        "type": "string",
-        "options": ["int8_float16", "int8", "float16"],
-        "default": "int8_float16",
-        "hint": "int8_float16 for GPU; falls back to CPU int8 automatically if CUDA libs are missing.",
-        "locales": { "zh": { "name": "计算精度", "hint": "GPU 用 int8_float16；CUDA 库缺失时自动回退 CPU int8" } }
-    },
-    "hf_endpoint": {
-        "name": "HuggingFace endpoint",
-        "type": "string",
-        "default": "https://hf-mirror.com",
-        "hint": "Used when downloading whisper models. Keep the CN mirror if huggingface.co is unreachable; set empty to use the official hub.",
-        "locales": {
-            "zh": {
-                "name": "HuggingFace 镜像",
-                "hint": "下载 whisper 模型用的 Hub 地址。国内默认 hf-mirror.com；若可直连官方源可清空"
-            }
-        }
-    },
-    "whisper_download_root": {
-        "name": "Whisper download root",
-        "type": "string",
-        "default": "",
-        "hint": "Optional local folder for model files (leave empty to use the default HF cache).",
-        "locales": {
-            "zh": {
-                "name": "模型下载目录",
-                "hint": "模型文件存放目录；留空使用 HuggingFace 默认缓存"
-            }
-        }
-    },
-    "asr_load_timeout_seconds": {
-        "name": "ASR load timeout (seconds)",
+    "stt_timeout_seconds": {
+        "name": "STT timeout (seconds)",
         "type": "integer",
-        "default": 600,
-        "minimum": 30,
-        "maximum": 1800,
-        "hint": "Max wait for first-time model download/load. On timeout the adapter recovers to idle.",
-        "locales": {
-            "zh": {
-                "name": "模型加载超时（秒）",
-                "hint": "首次下载/加载 whisper 模型的最长等待；超时后自动回到 idle，避免卡死"
-            }
-        }
+        "default": 20,
+        "minimum": 5,
+        "maximum": 120,
+        "hint": "Give up on a single recognition after this long.",
+        "locales": { "zh": { "name": "识别超时（秒）", "hint": "超时即放弃本次识别" } }
+    },
+    "silence_skip_dbfs": {
+        "name": "Silence skip (dBFS)",
+        "type": "float",
+        "default": -55.0,
+        "minimum": -80.0,
+        "maximum": 0.0,
+        "hint": "Skip recognition below this peak level; 0 disables.",
+        "locales": { "zh": { "name": "静音跳过阈值", "hint": "低于此电平不识别（0=关）" } }
     },
     "osc_in_port": {
         "name": "VRChat OSC input port",
@@ -212,8 +137,8 @@
         "default": 9000,
         "minimum": 1024,
         "maximum": 65535,
-        "hint": "UDP port VRChat listens on for chatbox commands.",
-        "locales": { "zh": { "name": "VRChat OSC 入站端口", "hint": "VRChat 接收聊天框消息的 UDP 端口" } }
+        "hint": "UDP port VRChat listens on for chatbox.",
+        "locales": { "zh": { "name": "OSC 入站端口", "hint": "VRChat 接收端口" } }
     },
     "send_interval": {
         "name": "Segment interval (seconds)",
@@ -221,8 +146,8 @@
         "default": 2,
         "minimum": 1,
         "maximum": 10,
-        "hint": "Minimum seconds between chatbox segments (short lines). Long lines wait longer based on reading speed. VRChat drops messages beyond 5 per 5s, keep >= 1.",
-        "locales": { "zh": { "name": "分段间隔（秒）", "hint": "聊天框分段发送的最小间隔（短句）。长句会按阅读速度自动拉长。VRChat 限制 5 秒内最多 5 条，不要低于 1" } }
+        "hint": "Minimum gap between chatbox segments; keep >= 1.",
+        "locales": { "zh": { "name": "分段间隔（秒）", "hint": "两段间最小间隔" } }
     },
     "read_chars_per_second": {
         "name": "Reading speed (chars/sec)",
@@ -230,13 +155,8 @@
         "default": 5,
         "minimum": 2,
         "maximum": 15,
-        "hint": "Used to space multi-segment replies: gap ≈ length / this value, clamped to [send_interval, max_segment_interval]. 5 suits casual Chinese reading.",
-        "locales": {
-            "zh": {
-                "name": "阅读速度（字/秒）",
-                "hint": "多段回复的间隔按「段字数 ÷ 此值」估算，限制在 [分段间隔, 最大分段间隔] 之间。中文休闲阅读约 5"
-            }
-        }
+        "hint": "Paces multi-segment replies; 5 suits casual Chinese.",
+        "locales": { "zh": { "name": "阅读速度（字/秒）", "hint": "按语速切段" } }
     },
     "max_segment_interval": {
         "name": "Max segment interval (seconds)",
@@ -244,20 +164,15 @@
         "default": 8,
         "minimum": 2,
         "maximum": 20,
-        "hint": "Upper bound for the reading-time gap between segments.",
-        "locales": { "zh": { "name": "最大分段间隔（秒）", "hint": "按阅读速度拉长后的间隔上限" } }
+        "hint": "Upper bound for the gap between segments.",
+        "locales": { "zh": { "name": "最大分段间隔（秒）", "hint": "间隔上限" } }
     },
     "reply_prefix": {
         "name": "Reply prefix",
         "type": "string",
         "default": "",
-        "hint": "Prefixed to every chatbox segment (e.g. 'yuki：'). Chatbox lines appear under the local player's name — the prefix marks bot replies. Strongly recommended. Leave empty to disable.",
-        "locales": {
-            "zh": {
-                "name": "回复前缀",
-                "hint": "每条聊天框消息前加上此前缀（如 yuki：）。聊天框会挂在本机玩家名下，前缀用来区分 bot 回复和你自己打的字，强烈建议填写。留空则不加"
-            }
-        }
+        "hint": "Prefixed to every chatbox line (e.g. yuki：).",
+        "locales": { "zh": { "name": "回复前缀", "hint": "如 yuki：" } }
     },
     "send_timeout_seconds": {
         "name": "Pipeline reply timeout (seconds)",
@@ -265,26 +180,21 @@
         "default": 120,
         "minimum": 15,
         "maximum": 600,
-        "hint": "If the bot pipeline never sends a reply within this window, the adapter returns to idle so the next PTT press is accepted.",
-        "locales": {
-            "zh": {
-                "name": "回复超时（秒）",
-                "hint": "若管线在此时间内没有回发消息，适配器自动回到 idle，避免卡死无法再次说话"
-            }
-        }
+        "hint": "Return to idle if the pipeline never replies.",
+        "locales": { "zh": { "name": "回复超时（秒）", "hint": "超时自动回到 idle" } }
     },
     "typing_indicator": {
         "name": "Typing indicator",
         "type": "switch",
         "default": true,
-        "hint": "Show the '...' typing indicator while transcribing/thinking.",
-        "locales": { "zh": { "name": "打字指示器", "hint": "识别/思考期间在聊天框显示省略号状态" } }
+        "hint": "Show '...' while transcribing/thinking.",
+        "locales": { "zh": { "name": "打字指示器", "hint": "显示「正在输入」" } }
     },
     "log_conversations": {
         "name": "Log conversations",
         "type": "switch",
         "default": true,
-        "hint": "Append each recognized text and reply to plugin_data/vrclink/conversations.jsonl.",
-        "locales": { "zh": { "name": "记录对话", "hint": "把识别文本与回复追加到 plugin_data/vrclink/conversations.jsonl" } }
+        "hint": "Append recognized text and replies to a local jsonl.",
+        "locales": { "zh": { "name": "记录对话", "hint": "存到本地 jsonl" } }
     }
 }
