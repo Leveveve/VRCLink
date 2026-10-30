@@ -131,6 +131,13 @@
         "hint": "Skip recognition below this peak level; 0 disables.",
         "locales": { "zh": { "name": "静音跳过阈值", "hint": "低于此电平不识别（0=关）" } }
     },
+    "disable_tools": {
+        "name": "Disable tools in game",
+        "type": "switch",
+        "default": true,
+        "hint": "Faster replies; tools unavailable in game.",
+        "locales": { "zh": { "name": "游戏内禁用工具", "hint": "更快，但用不了搜索等工具" } }
+    },
     "osc_in_port": {
         "name": "VRChat OSC input port",
         "type": "integer",

@@ -24,7 +24,8 @@ _VRCHAT_CONTEXT_PROMPT = """\
 ## VRChat 聊天环境（重要）
 - 当前对话发生在 VRChat 游戏内。用户通过按住按键说话（语音转文字）与你交流，识别结果可能有错字或同音字，按语义理解即可，不要纠结错别字。
 - 你的回复会发送到 VRChat 聊天框（chatbox），**全房间可见**，不是私密消息。避免只适合私聊的过度亲昵、长篇独白或敏感私事。
-- 回复尽量短、口语化，适合游戏内聊天框快速阅读；长内容拆成几个自然短句（系统会自动分段发送）。
+- 回复要快：先给一句不超过 30 字的直接回答，再按需要补一句；不要展开推理、不要铺垫、不要复述问题。
+- 适合游戏内聊天框快速阅读；确实需要长内容时拆成几个自然短句（系统会自动分段发送）。
 - 你看不到房间里其他玩家，也不知道具体世界/实例名称；若用户提到场景，按TA描述的内容回应即可。
 """
 
@@ -110,11 +111,27 @@ class VRCLinkPlugin(BasePlugin):
         platform = str(getattr(adapter, "platform", "") or "")
         if platform != "VRChat":
             return
+        # Optional tool suppression: a tool call costs a whole extra LLM
+        # round-trip before any reply appears, which dominates the wait in
+        # voice chat. Defaults to on; QQ and other platforms are unaffected.
+        if self._tools_disabled_in_game():
+            req.tool_set = None
+            req.tools = None
+            req.tool_funcs = None
+            req.tool_choice = "none"
         req.system_prompt.append(Prompt(
             content=_VRCHAT_CONTEXT_PROMPT,
             name="vrclink_context",
             source="vrclink",
         ))
+
+    def _tools_disabled_in_game(self) -> bool:
+        """Read `disable_tools` from the VRChat adapter instance (default True)."""
+        ada = self._find_adapter()
+        cfg = getattr(ada, "config", None) if ada is not None else None
+        if not isinstance(cfg, dict):
+            return True
+        return bool(cfg.get("disable_tools", True))
 
     # ── helpers ──
 
