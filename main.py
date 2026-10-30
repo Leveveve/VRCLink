@@ -115,10 +115,20 @@ class VRCLinkPlugin(BasePlugin):
         # round-trip before any reply appears, which dominates the wait in
         # voice chat. Defaults to on; QQ and other platforms are unaffected.
         if self._tools_disabled_in_game():
-            req.tool_set = None
-            req.tools = None
-            req.tool_funcs = None
-            req.tool_choice = "none"
+            # Empty the tool list but KEEP the ToolSet object: the assemble
+            # stage calls `req.tool_set.to_list()` right after this hook, so
+            # setting tool_set=None raises AttributeError and the turn hangs
+            # until the adapter's send timeout. Never let this break a turn.
+            try:
+                req.tool_choice = "none"
+                tool_set = getattr(req, "tool_set", None)
+                if tool_set is not None and hasattr(tool_set, "tools"):
+                    tool_set.tools = []
+                else:
+                    req.tools = []
+                req.tool_funcs = {}
+            except Exception as e:  # fail open: a stuck turn is worse than tools
+                logger.warning(f"disable_tools skipped: {e}")
         req.system_prompt.append(Prompt(
             content=_VRCHAT_CONTEXT_PROMPT,
             name="vrclink_context",
