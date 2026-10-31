@@ -134,7 +134,7 @@
     "disable_tools": {
         "name": "Disable tools in game",
         "type": "switch",
-        "default": true,
+        "default": false,
         "hint": "Faster replies; tools unavailable in game.",
         "locales": { "zh": { "name": "游戏内禁用工具", "hint": "更快，但用不了搜索等工具" } }
     },

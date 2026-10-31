@@ -136,12 +136,16 @@ class VRCLinkPlugin(BasePlugin):
         ))
 
     def _tools_disabled_in_game(self) -> bool:
-        """Read `disable_tools` from the VRChat adapter instance (default True)."""
+        """Read `disable_tools` from the VRChat adapter instance.
+
+        Defaults to False: shipping a plugin that silently removes the bot's
+        tools would surprise every new user, so it is opt-in.
+        """
         ada = self._find_adapter()
         cfg = getattr(ada, "config", None) if ada is not None else None
         if not isinstance(cfg, dict):
-            return True
-        return bool(cfg.get("disable_tools", True))
+            return False
+        return bool(cfg.get("disable_tools", False))
 
     # ── helpers ──
 
