@@ -549,11 +549,47 @@ class _Recorder:
 
 def _parse_hotkey(spec: str):
     """'ctrl+shift+v' -> ({'ctrl','shift'}, 'v');  'b' -> (set(), 'b');
-    'x2'/'x3' -> mouse side button marker."""
-    parts = [p.strip().lower() for p in (spec or "").split("+") if p.strip()]
+    'x2'/'x3' -> mouse side button marker.
+
+    Raises ValueError with a readable message for specs that could never
+    match, so the settings page can show why instead of arming a dead key.
+    """
+    parts = [p.strip().lower() for p in str(spec or "").split("+") if p.strip()]
     if not parts:
-        return set(), ""
-    return set(parts[:-1]), parts[-1]
+        raise ValueError("hotkey is empty; try b, ctrl+b, f8 or x2")
+    key, raw_mods = parts[-1], parts[:-1]
+    mods: set[str] = set()
+    for name in raw_mods:
+        canon = _MOD_INPUT_ALIASES.get(name)
+        if canon is None:
+            raise ValueError(f"unknown modifier {name!r}; use ctrl, shift or alt")
+        mods.add(canon)
+    if key in _MOD_INPUT_ALIASES:
+        raise ValueError("hotkey must end with a non-modifier key, e.g. ctrl+b")
+    if key in ("x1", "x2", "x3"):
+        if mods:
+            raise ValueError("mouse side buttons cannot be combined with modifiers; use x1, x2 or x3 alone")
+        return mods, key
+    if len(key) == 1 or key in _NAMED_KEYS:
+        return mods, key
+    raise ValueError(
+        f"unknown key {key!r}; use one character, f1-f24, space/tab/enter, or x1-x3"
+    )
+
+
+# Accepted spellings on the left, canonical modifier name on the right.
+_MOD_INPUT_ALIASES = {
+    "ctrl": "ctrl", "control": "ctrl", "ctl": "ctrl",
+    "shift": "shift",
+    "alt": "alt", "option": "alt", "opt": "alt",
+}
+
+# Non-character keys a user may type as the trigger.
+_NAMED_KEYS = {
+    "space", "tab", "enter", "return", "esc", "escape", "backspace", "delete", "insert",
+    "home", "end", "page_up", "page_down", "up", "down", "left", "right",
+    "caps_lock", "num_lock", "scroll_lock", "print_screen", "pause", "menu",
+} | {f"f{i}" for i in range(1, 25)}
 
 
 class _HotkeyWatcher:
@@ -568,8 +604,10 @@ class _HotkeyWatcher:
         "shift": {"shift", "shift_l", "shift_r"},
         "alt": {"alt", "alt_l", "alt_r", "alt_gr"},
     }
+    _ALL_MOD_NAMES = _MOD_ALIASES["ctrl"] | _MOD_ALIASES["shift"] | _MOD_ALIASES["alt"]
 
     def __init__(self, spec: str, on_down, on_up):
+        self.spec = spec
         self.mods, self.key = _parse_hotkey(spec)
         self.is_mouse = self.key in ("x1", "x2", "x3")
         self.on_down = on_down
@@ -581,6 +619,46 @@ class _HotkeyWatcher:
         self._listener = None
         if not self.key:
             raise ValueError("empty hotkey")
+
+    # ── keyboard state machine (split out so it can be driven without a hook) ──
+
+    @staticmethod
+    def _norm(key) -> str:
+        from pynput import keyboard
+
+        if isinstance(key, keyboard.KeyCode):
+            return (key.char or "").lower() or f"vk{key.vk}"
+        return getattr(key, "name", "") or ""
+
+    def _matches(self, key_norm: str) -> bool:
+        """Exact modifier match: ctrl+b must not fire on ctrl+shift+b."""
+        if key_norm != self.key:
+            return False
+        for name, aliases in self._MOD_ALIASES.items():
+            if bool(self._held_mods & aliases) != (name in self.mods):
+                return False
+        return True
+
+    def _handle_press(self, key):
+        n = self._norm(key)
+        if n in self._ALL_MOD_NAMES:
+            self._held_mods.add(n)
+            return
+        if self._matches(n) and not self._pressed:   # 自动重复只认第一次
+            self._pressed = True
+            self.on_down()
+
+    def _handle_release(self, key):
+        n = self._norm(key)
+        if n == self.key:
+            was_pressed, self._pressed = self._pressed, False
+            # 触发键一松就收尾，不管修饰键是否已经先松开：否则"先松 ctrl 再松 b"
+            # 会让 matches() 不成立，录音卡在 recording 直到 max_record_seconds。
+            if was_pressed:
+                self.on_up()
+            return
+        if n in self._ALL_MOD_NAMES:
+            self._held_mods.discard(n)
 
     def start(self):
         if self.is_mouse:
@@ -606,45 +684,9 @@ class _HotkeyWatcher:
         else:
             from pynput import keyboard
 
-            def norm(key):
-                if isinstance(key, keyboard.KeyCode):
-                    return (key.char or "").lower() or f"vk{key.vk}"
-                return getattr(key, "name", "") or ""
-
-            want_ctrl = "ctrl" in self.mods
-            want_shift = "shift" in self.mods
-            want_alt = "alt" in self.mods
-
-            def matches(held: set[str], key_norm: str) -> bool:
-                if key_norm != self.key:
-                    return False
-                got_ctrl = bool(held & self._MOD_ALIASES["ctrl"])
-                got_shift = bool(held & self._MOD_ALIASES["shift"])
-                got_alt = bool(held & self._MOD_ALIASES["alt"])
-                return got_ctrl == want_ctrl and got_shift == want_shift and got_alt == want_alt
-
-            def on_press(key):
-                n = norm(key)
-                if n in self._MOD_ALIASES["ctrl"] | self._MOD_ALIASES["shift"] | self._MOD_ALIASES["alt"]:
-                    self._held_mods.add(n)
-                elif matches(self._held_mods, n):
-                    # 自动重复的 on_press 只认第一次
-                    if not self._pressed:
-                        self._pressed = True
-                        self.on_down()
-
-            def on_release(key):
-                n = norm(key)
-                # 触发键一松开就解锁状态位：修饰键可能先松掉，此时 matches 不成立，
-                # 若不解锁，下一次按下会被当成"自动重复"被吞掉（组合键失效）
-                if n == self.key:
-                    self._pressed = False
-                if n in self._MOD_ALIASES["ctrl"] | self._MOD_ALIASES["shift"] | self._MOD_ALIASES["alt"]:
-                    self._held_mods.discard(n)
-                elif matches(self._held_mods, n):
-                    self.on_up()
-
-            self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._listener = keyboard.Listener(
+                on_press=self._handle_press, on_release=self._handle_release
+            )
         self._listener.daemon = True
         self._listener.start()
 
@@ -908,13 +950,23 @@ class VRChatAdapter(BaseAdapter):
         def spawn(coro):
             asyncio.create_task(coro)
 
-        self._hotkey = _HotkeyWatcher(
-            spec,
-            on_down=lambda: loop.call_soon_threadsafe(spawn, self._on_hotkey_down()),
-            on_up=lambda: loop.call_soon_threadsafe(spawn, self._on_hotkey_up()),
-        )
-        self._hotkey.start()
-        logger.info(f"hotkey armed: {spec!r} ({cfg.get('ptt_mode', 'hold')} mode)")
+        self._hotkey = None
+        try:
+            self._hotkey = _HotkeyWatcher(
+                spec,
+                on_down=lambda: loop.call_soon_threadsafe(spawn, self._on_hotkey_down()),
+                on_up=lambda: loop.call_soon_threadsafe(spawn, self._on_hotkey_up()),
+            )
+            self._hotkey.start()
+            mods = "+".join(sorted(self._hotkey.mods)) or "无"
+            logger.info(
+                f"hotkey armed: {spec!r} (mods={mods}, {cfg.get('ptt_mode', 'hold')} mode)"
+            )
+        except Exception as e:
+            # A bad spec must not kill the adapter: keep the status page and the
+            # test tools alive so the user can see why and fix it.
+            self.last_error = f"热键无效：{spec!r} — {e}"
+            logger.error(f"hotkey not armed: {e}")
 
         self._tasks.append(asyncio.create_task(self._probe_loop()))
         self._tasks.append(asyncio.create_task(self._state_watchdog()))

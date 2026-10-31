@@ -64,7 +64,7 @@
         "type": "string",
         "default": "b",
         "hint": "Single key, combo (ctrl+shift+v) or mouse x2/x3.",
-        "locales": { "zh": { "name": "热键", "hint": "按住说话的按键" } }
+        "locales": { "zh": { "name": "热键", "hint": "如 b、ctrl+b、f8、x2" } }
     },
     "hotkey_require_focus": {
         "name": "Only when VRChat focused",
