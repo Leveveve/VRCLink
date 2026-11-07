@@ -3,9 +3,16 @@
     "plugin_id": "vrclink",
     "version": "1.0.0",
     "core_version": ">=3.0.0",
-    "author": "xl233",
+    "author": "Levi.A",
     "description": "Talk to your KiraAI bot inside VRChat: push-to-talk voice → cloud speech-to-text → reply in the game chatbox. Keyboard and VR-controller PTT (via OVR Advanced Settings Key Press).",
-    "tags": ["vrchat", "voice", "stt", "bridge", "osc", "ptt"],
+    "tags": [
+        "vrchat",
+        "voice",
+        "stt",
+        "bridge",
+        "osc",
+        "ptt"
+    ],
     "repo": "https://github.com/Leveveve/VRCLink",
     "icon": "icon.svg",
     "locales": {
